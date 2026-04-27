@@ -1,0 +1,6 @@
+{
+  "name": "Language Doctor",
+  "description": "AI-powered medical translation and patient intake assistant for English and Swahili.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["AI Translation", "Medical Intake", "Structured Summaries"]
+}
