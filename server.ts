@@ -12,10 +12,15 @@ async function startServer() {
 
   app.use(express.json());
 
-  const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
-  const model = genAI.getGenerativeModel({ 
-    model: "gemini-2.0-flash",
-    systemInstruction: `You are a medical translator specifically trained for English and Swahili.
+  const getModel = () => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
+      throw new Error("GEMINI_API_KEY is not configured correctly. Please open the 'Secrets' panel in the AI Studio sidebar and set your GEMINI_API_KEY there.");
+    }
+    const genAI = new GoogleGenerativeAI(apiKey);
+    return genAI.getGenerativeModel({ 
+      model: "gemini-1.5-flash",
+      systemInstruction: `You are a medical translator specifically trained for English and Swahili.
 Rules:
 - Maintain strict medical accuracy.
 - Preserve symptoms exactly.
@@ -23,12 +28,14 @@ Rules:
 - Do not simplify critical medical terms unless requested by the doctor for the patient.
 - Keep tone professional and empathetic.
 - When translating intake data, extract structural information like name, age, and symptoms.`
-  });
+    });
+  };
 
   // API Endpoints
   app.post("/api/translate", async (req, res) => {
     try {
       const { text, from, to, context } = req.body;
+      const model = getModel();
       const prompt = `Translate this medical communication from ${from} to ${to}. 
       Context: ${context || "General medical consultation"}.
       Text: "${text}"`;
@@ -38,13 +45,14 @@ Rules:
       res.json({ translatedText });
     } catch (error) {
       console.error("Translation error:", error);
-      res.status(500).json({ error: "Translation failed" });
+      res.status(500).json({ error: error instanceof Error ? error.message : "Translation failed" });
     }
   });
 
   app.post("/api/summarize", async (req, res) => {
     try {
       const { patientData, conversation } = req.body;
+      const model = getModel();
       const prompt = `Generate a structured Medical Intake Summary based on this data:
       Patient Data: ${JSON.stringify(patientData)}
       Conversation History: ${JSON.stringify(conversation)}
@@ -62,7 +70,7 @@ Rules:
       res.json({ summary });
     } catch (error) {
       console.error("Summary error:", error);
-      res.status(500).json({ error: "Summary generation failed" });
+      res.status(500).json({ error: error instanceof Error ? error.message : "Summary generation failed" });
     }
   });
 

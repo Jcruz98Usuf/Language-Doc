@@ -16,6 +16,7 @@ export default function ConversationView({
 }: ConversationViewProps) {
   const [inputText, setInputText] = useState("");
   const [isTranslating, setIsTranslating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<"doctor" | "patient">("doctor");
   const scrollRefEn = useRef<HTMLDivElement>(null);
   const scrollRefSw = useRef<HTMLDivElement>(null);
@@ -29,6 +30,7 @@ export default function ConversationView({
     e.preventDefault();
     if (!inputText.trim() || isTranslating) return;
 
+    setError(null);
     const sourceLang = currentUser === "doctor" ? Language.ENGLISH : Language.SWAHILI;
     const targetLang = currentUser === "doctor" ? Language.SWAHILI : Language.ENGLISH;
     
@@ -54,6 +56,7 @@ export default function ConversationView({
       setInputText("");
     } catch (err) {
       console.error(err);
+      setError(err instanceof Error ? err.message : "An unexpected error occurred during translation.");
     } finally {
       setIsTranslating(false);
     }
@@ -61,6 +64,17 @@ export default function ConversationView({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      {error && (
+        <div className="bg-red-50 border-b border-red-100 p-3 flex items-center justify-between animate-in slide-in-from-top duration-300">
+          <div className="flex items-center gap-2 text-red-600 text-xs font-bold uppercase tracking-wider">
+            <span className="h-2 w-2 rounded-full bg-red-600 animate-pulse" />
+            Error: {(error.toLowerCase().includes("api key") || error.includes("GEMINI_API_KEY")) 
+              ? "API Key Configuration Required (Check Secrets Panel)" 
+              : error}
+          </div>
+          <button onClick={() => setError(null)} className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded font-black hover:bg-red-200 transition-colors">DISMISS</button>
+        </div>
+      )}
       <div className="flex-grow grid grid-cols-2 gap-px bg-slate-200 overflow-hidden">
         {/* Doctor Interface (English) */}
         <section className="bg-white flex flex-col p-8 overflow-hidden">
