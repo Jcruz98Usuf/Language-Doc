@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import fetch from "node-fetch";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -12,62 +12,30 @@ async function startServer() {
 
   app.use(express.json());
 
-  const getModel = () => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-      throw new Error("GEMINI_API_KEY is not configured correctly. Please open the 'Secrets' panel in the AI Studio sidebar and set your GEMINI_API_KEY there.");
-    }
-    const genAI = new GoogleGenerativeAI(apiKey);
-    return genAI.getGenerativeModel({ 
-      model: "gemini-1.5-flash",
-      systemInstruction: `You are a medical translator specifically trained for English and Swahili.
-Rules:
-- Maintain strict medical accuracy.
-- Preserve symptoms exactly.
-- Do not add diagnosis or treatment advice.
-- Do not simplify critical medical terms unless requested by the doctor for the patient.
-- Keep tone professional and empathetic.
-- When translating intake data, extract structural information like name, age, and symptoms.`
-    });
-  };
+
 
   // API Endpoints
   app.post("/api/translate", async (req, res) => {
     try {
-      const { text, from, to, context } = req.body;
-      const model = getModel();
-      const prompt = `Translate this medical communication from ${from} to ${to}. 
-      Context: ${context || "General medical consultation"}.
-      Text: "${text}"`;
-      
-      const result = await model.generateContent(prompt);
-      const translatedText = result.response.text();
-      res.json({ translatedText });
+      const { text } = req.body;
+      const response = await fetch("http://localhost:5000/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      const data: any = await response.json();
+      res.json({ translatedText: data.translatedText });
     } catch (error) {
       console.error("Translation error:", error);
-      res.status(500).json({ error: error instanceof Error ? error.message : "Translation failed" });
+      res.status(500).json({ error: "Translation failed" });
     }
   });
 
   app.post("/api/summarize", async (req, res) => {
     try {
       const { patientData, conversation } = req.body;
-      const model = getModel();
-      const prompt = `Generate a structured Medical Intake Summary based on this data:
-      Patient Data: ${JSON.stringify(patientData)}
-      Conversation History: ${JSON.stringify(conversation)}
-      
-      Format strictly as:
-      PATIENT INTAKE SUMMARY
-      Name: ...
-      DOB/Age: ...
-      Primary Complaint: ...
-      History of Present Illness: ...
-      Notes: ...`;
-      
-      const result = await model.generateContent(prompt);
-      const summary = result.response.text();
-      res.json({ summary });
+      // Summarization is not implemented with local model yet
+      res.status(501).json({ error: "Summarization not implemented with local model." });
     } catch (error) {
       console.error("Summary error:", error);
       res.status(500).json({ error: error instanceof Error ? error.message : "Summary generation failed" });
