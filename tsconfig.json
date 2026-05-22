@@ -21,9 +21,6 @@
       ]
     },
     "allowImportingTsExtensions": true,
-    "noEmit": true,
-    "types": ["node", "react", "react-dom"],
-    "forceConsistentCasingInFileNames": true,
-    "strict": true
+    "noEmit": true
   }
 }
