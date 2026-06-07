@@ -1,35 +1,91 @@
-import { RefreshCw } from "lucide-react";
-import { AppMode, PatientData } from "../types";
+import { RefreshCw, GraduationCap, Sparkles } from "lucide-react";
+import { AppMode, PatientData, AppDomain } from "../types";
 
 interface HeaderProps {
   mode: AppMode;
   patientData: PatientData | null;
+  domain: AppDomain;
   onReset: () => void;
   onEndSession?: () => void;
 }
 
-export default function Header({ mode, patientData, onReset, onEndSession }: HeaderProps) {
+export default function Header({ mode, patientData, domain, onReset, onEndSession }: HeaderProps) {
+  const getDomainTheme = () => {
+    switch (domain) {
+      case AppDomain.HOTEL:
+        return {
+          title: "Safari Lodging Concierge",
+          badgeColor: "bg-emerald-50 text-emerald-700",
+          accentColor: "text-emerald-600",
+          lblPrimary: "Guest name",
+          lblSecondary: "Nights"
+        };
+      case AppDomain.OFFICE:
+        return {
+          title: "Bilingual Workspace Sync",
+          badgeColor: "bg-violet-50 text-violet-700",
+          accentColor: "text-violet-600",
+          lblPrimary: "Lead member",
+          lblSecondary: "Team"
+        };
+      default:
+        return {
+          title: "Swahili Clinic Assistant",
+          badgeColor: "bg-blue-50 text-blue-700",
+          accentColor: "text-blue-600",
+          lblPrimary: "Patient Name",
+          lblSecondary: "Age"
+        };
+    }
+  };
+
+  const theme = getDomainTheme();
+
+  const getPrimaryValue = () => {
+    if (!patientData) return null;
+    if (domain === AppDomain.HOTEL) return patientData.guestName || patientData.name;
+    if (domain === AppDomain.OFFICE) return patientData.employeeName || patientData.name;
+    return patientData.name;
+  };
+
+  const getSecondaryValue = () => {
+    if (!patientData) return null;
+    if (domain === AppDomain.HOTEL) return patientData.duration || patientData.age || "Not specified";
+    if (domain === AppDomain.OFFICE) return patientData.department || "General Team";
+    return patientData.age ? `${patientData.age} yrs` : "Not specified";
+  };
+
+  const primaryVal = getPrimaryValue();
+  const secondaryVal = getSecondaryValue();
+
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-50">
+    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-40 shrink-0">
       <div className="flex items-center gap-6">
-        {patientData ? (
+        {primaryVal ? (
           <>
             <div className="flex flex-col">
-              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider leading-none mb-1">Patient Name</span>
-              <span className="text-sm font-semibold text-slate-900">
-                {patientData.name} ({patientData.gender === 'male' ? 'M' : 'F'}, {patientData.age})
+              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider leading-none mb-1">{theme.lblPrimary}</span>
+              <span className="text-sm font-semibold text-slate-900 truncate max-w-[150px] sm:max-w-none">
+                {primaryVal}
+              </span>
+            </div>
+            <div className="h-8 w-px bg-slate-200 hidden sm:block"></div>
+            <div className="flex flex-col">
+              <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider leading-none mb-1">{theme.lblSecondary}</span>
+              <span className="text-sm font-semibold text-slate-800">
+                {secondaryVal}
               </span>
             </div>
             <div className="h-8 w-px bg-slate-200 hidden sm:block"></div>
             <div className="flex flex-col">
               <span className="text-[10px] uppercase text-slate-400 font-bold tracking-wider leading-none mb-1">Target Language</span>
-              <span className="text-sm font-semibold text-slate-900">Kiswahili (Kenya)</span>
+              <span className="text-sm font-semibold text-slate-900 flex items-center gap-1">Kiswahili <Sparkles className="h-3 w-3 text-amber-500" /></span>
             </div>
           </>
         ) : (
           <div className="flex items-center gap-2">
-            <span className="text-sm font-bold text-slate-900 tracking-tight">LANGUAGE DOCTOR</span>
-            <span className="text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-bold">READY</span>
+            <span className="text-sm font-bold text-slate-900 tracking-tight uppercase">{theme.title}</span>
+            <span className={`text-[10px] ${theme.badgeColor} px-2 py-0.5 rounded-full font-bold uppercase tracking-wider`}>Live Bridge</span>
           </div>
         )}
       </div>

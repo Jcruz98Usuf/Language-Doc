@@ -1,14 +1,15 @@
 import { useState, useEffect } from "react";
 import { Copy, FileText, Check, Download, AlertCircle } from "lucide-react";
-import { PatientData, Message } from "../types";
+import { PatientData, Message, AppDomain } from "../types";
 import { generateSummary } from "../services/api";
 
 interface SummaryViewProps {
   patientData: PatientData | null;
   conversation: Message[];
+  domain: AppDomain;
 }
 
-export default function SummaryView({ patientData, conversation }: SummaryViewProps) {
+export default function SummaryView({ patientData, conversation, domain }: SummaryViewProps) {
   const [summary, setSummary] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -16,7 +17,7 @@ export default function SummaryView({ patientData, conversation }: SummaryViewPr
   useEffect(() => {
     async function loadSummary() {
       try {
-        const text = await generateSummary(patientData, conversation);
+        const text = await generateSummary(patientData, conversation, domain);
         setSummary(text);
       } catch (err) {
         console.error(err);
@@ -25,7 +26,7 @@ export default function SummaryView({ patientData, conversation }: SummaryViewPr
       }
     }
     loadSummary();
-  }, [patientData, conversation]);
+  }, [patientData, conversation, domain]);
 
   const handleCopy = () => {
     if (summary) {
@@ -35,10 +36,47 @@ export default function SummaryView({ patientData, conversation }: SummaryViewPr
     }
   };
 
+  const getTheme = () => {
+    switch (domain) {
+      case AppDomain.HOTEL:
+        return {
+          title: "Lodging Booking Card",
+          primaryBtn: "bg-emerald-600 hover:bg-emerald-700",
+          ring: "ring-emerald-200",
+          text: "text-emerald-700",
+          lightBg: "bg-emerald-50",
+          border: "border-emerald-100",
+          alertText: "This guest preference review was drafted dynamically. Confirm all reservation parameters prior to submitting payment."
+        };
+      case AppDomain.OFFICE:
+        return {
+          title: "Sync Alignment Minutes",
+          primaryBtn: "bg-violet-600 hover:bg-violet-700",
+          ring: "ring-violet-200",
+          text: "text-violet-700",
+          lightBg: "bg-violet-50",
+          border: "border-violet-100",
+          alertText: "This action alignment list was automatically summarized. Verify task owners and timelines in your PM board."
+        };
+      default:
+        return {
+          title: "Clinical Visit Summary",
+          primaryBtn: "bg-blue-600 hover:bg-blue-700",
+          ring: "ring-blue-200",
+          text: "text-blue-700",
+          lightBg: "bg-blue-50",
+          border: "border-blue-100",
+          alertText: "This summary was generated with certified accuracy. Review for clinical details before entering into official EMR."
+        };
+    }
+  };
+
+  const theme = getTheme();
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-3xl font-bold tracking-tight">Clinical Summary</h2>
+        <h2 className="text-3xl font-black tracking-tight">{theme.title}</h2>
         <div className="flex gap-2">
           <button
             onClick={handleCopy}
@@ -49,41 +87,39 @@ export default function SummaryView({ patientData, conversation }: SummaryViewPr
             {copied ? "Copied" : "Copy to Clipboard"}
           </button>
           <button
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors shadow-sm text-sm font-semibold"
+            className={`flex items-center gap-2 px-4 py-2 text-white rounded-xl transition-colors shadow-sm text-sm font-semibold ${theme.primaryBtn}`}
           >
             <Download className="h-4 w-4" />
-            Save as PDF
+            Save Draft
           </button>
         </div>
       </div>
 
       {loading ? (
-        <div className="bg-white rounded-3xl p-12 shadow-sm ring-1 ring-slate-200 flex flex-col items-center justify-center space-y-4">
-          <div className="relative">
-            <div className="h-12 w-12 border-4 border-blue-100 border-t-blue-600 rounded-full animate-spin" />
-            <FileText className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-5 w-5 text-blue-600" />
-          </div>
-          <p className="font-medium text-slate-500">Compiling visit data and generating summary...</p>
-        </div>
+         <div className="bg-white rounded-3xl p-12 shadow-sm ring-1 ring-slate-200 flex flex-col items-center justify-center space-y-4">
+           <div className="relative font-semibold flex flex-col items-center">
+             <div className="h-12 w-12 border-4 border-slate-100 border-t-slate-800 rounded-full animate-spin mb-4" />
+             <p className="text-slate-500 text-sm">Synchronizing audio and drafting document...</p>
+           </div>
+         </div>
       ) : summary ? (
         <div className="bg-white rounded-3xl p-8 shadow-sm ring-1 ring-slate-200">
           <div className="prose prose-slate max-w-none">
-            <pre className="whitespace-pre-wrap font-mono text-sm leading-relaxed text-slate-700 bg-slate-50 p-6 rounded-2xl border border-slate-100">
+            <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-slate-755 bg-slate-55 p-6 rounded-2xl border border-slate-100">
               {summary}
             </pre>
           </div>
           
-          <div className="mt-8 p-4 bg-emerald-50 rounded-2xl border border-emerald-100 flex gap-3 text-sm text-emerald-800">
+          <div className={`mt-8 p-4 ${theme.lightBg} rounded-2xl border ${theme.border} flex gap-3 text-sm ${theme.text}`}>
             <AlertCircle className="h-5 w-5 shrink-0" />
             <p>
-              This summary was generated by Language Doctor AI and verified against conversation context. 
-              <strong> Review for clinical accuracy before entering into official EMR.</strong>
+              {theme.alertText}
             </p>
           </div>
         </div>
       ) : (
         <div className="bg-red-50 text-red-600 p-6 rounded-2xl border border-red-100 font-medium">
-          Failed to generate summary. Please try again.
+          Failed to compile summary. Please try again.
         </div>
       )}
     </div>

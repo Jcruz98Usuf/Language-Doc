@@ -1,21 +1,36 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Languages, Mic, MicOff, Volume2 } from "lucide-react";
-import { PatientData, Message, Language } from "../types";
-import { translateText } from "../services/api";
+import { Send, Languages, Mic, MicOff, Volume2, Sparkles, Activity, AlertCircle, RefreshCw } from "lucide-react";
+import { PatientData, Message, Language, AppDomain } from "../types";
+import { translateText, parseDialogue } from "../services/api";
+
+const LOCAL_LANGUAGES = [
+  { value: Language.SWAHILI, label: "Kiswahili (Swahili)", code: "sw-TZ", ttsCode: "sw-KE" },
+  { value: Language.LUGANDA, label: "Luganda (Uganda)", code: "lg-UG", ttsCode: "en-US" },
+  { value: Language.KINYARWANDA, label: "Kinyarwanda (Rwanda)", code: "rw-RW", ttsCode: "rw-RW" },
+  { value: Language.SOMALI, label: "Af-Soomaali (Somali)", code: "so-SO", ttsCode: "so-SO" },
+  { value: Language.LUO, label: "Dholuo (Luo)", code: "luo-KE", ttsCode: "en-US" },
+  { value: Language.GIKUYU, label: "Gĩkũyũ (Kikuyu)", code: "ki-KE", ttsCode: "ki-KE" },
+  { value: Language.KALENJIN, label: "Kalenjin", code: "kln-KE", ttsCode: "kln-KE" },
+];
 
 interface ConversationViewProps {
   patientData: PatientData | null;
+  onUpdatePatientData: (data: PatientData) => void;
   messages: Message[];
   onUpdateMessages: (messages: Message[]) => void;
   onEndSession: () => void;
+  domain: AppDomain;
 }
 
 export default function ConversationView({
   patientData,
+  onUpdatePatientData,
   messages,
   onUpdateMessages,
   onEndSession,
+  domain,
 }: ConversationViewProps) {
+  const [selectedLocalLanguage, setSelectedLocalLanguage] = useState<Language>(Language.SWAHILI);
   const [inputText, setInputText] = useState("");
   const [isTranslating, setIsTranslating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,15 +73,15 @@ export default function ConversationView({
   useEffect(() => {
     if (scrollRefEn.current) scrollRefEn.current.scrollTop = scrollRefEn.current.scrollHeight;
     if (scrollRefSw.current) scrollRefSw.current.scrollTop = scrollRefSw.current.scrollHeight;
-  }, [messages]);
+  }, [messages, isListeningEn, isListeningSw, interimTranscript]);
 
-  // Handle Speech Recognition Setup (Runs exactly once on mount, fully isolated and leak-free)
+  // Handle Speech Recognition Setup
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (SpeechRecognition) {
       const rec = new SpeechRecognition();
-      rec.continuous = false; // Stops recording when user pauses speaking for automatic translation
-      rec.interimResults = true; // Provides dynamic in-progress translations
+      rec.continuous = true; // KEEP MIC ALIVE so user can speak multiple sentences without getting cut off!
+      rec.interimResults = true; // Provides dynamic visual in-progress words
 
       rec.onstart = () => {
         isRecognitionActiveRef.current = true;
@@ -74,38 +89,37 @@ export default function ConversationView({
       };
 
       rec.onresult = (event: any) => {
-        let final = "";
-        let interim = "";
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
+        let finalTranscript = "";
+        let interimTranscriptText = "";
+
+        for (let i = 0; i < event.results.length; ++i) {
+          const transcript = event.results[i][0].transcript;
           if (event.results[i].isFinal) {
-            final += event.results[i][0].transcript;
+            finalTranscript += transcript;
           } else {
-            interim += event.results[i][0].transcript;
+            interimTranscriptText += transcript;
           }
         }
-        
-        if (final) {
-          setInputText(final);
-          setInterimTranscript("");
-        } else if (interim) {
-          setInterimTranscript(interim);
-        }
+
+        setInputText(finalTranscript);
+        setInterimTranscript(interimTranscriptText);
       };
 
       rec.onerror = (event: any) => {
         const errType = event.error;
-        console.warn("Speech Recognition Info:", errType);
+        console.warn("Speech Recognition Error:", errType);
         
-        if (errType === "not-allowed") {
-          setError("Microphone permission denied. Please verify microphone access in browser settings.");
+        if (errType === "not-allowed" || errType === "service-not-allowed") {
+          setError("Microphone permission blocked. Click the top-right 'Open in New Tab' button to permit mic access outside of the secure iframe preview!");
         } else if (errType === "network") {
-          // Graceful handling for Web Speech API cloud network drops
-          console.warn("Speech recognition network interruption detected. Continuing consultation...");
+          setError("Speach connection error: Chrome blocks Web Speech inside nested frames. Click the top-right 'Open in New Tab' button to run correctly.");
+        } else if (errType === "no-speech") {
+          // Ignore no-speech error gracefully as it's common when waiting
+          console.log("Speech Recognition: No speech detected.");
         } else if (errType === "aborted") {
-          // Expected when we intentionally reset / switch voices
-          console.log("Speech recognition successfully stopped/aborted.");
+          console.log("Speech recognition stopped.");
         } else {
-          setError(`Speech input error: ${errType}`);
+          setError(`Speech capture check: ${errType}. Try opening the app in a new browser tab.`);
         }
         
         isRecognitionActiveRef.current = false;
@@ -123,20 +137,24 @@ export default function ConversationView({
         const shouldIgnore = ignoreNextSubmitRef.current;
         ignoreNextSubmitRef.current = false;
 
-        // Auto-submit recognized speech text with zero-tap convenience after speech ends
-        setInputText((latestText) => {
-          if (!shouldIgnore && latestText.trim()) {
-            const sender = currentListeningUserRef.current;
-            if (sender) {
-              setTimeout(() => {
-                translateAndSendMessageRef.current?.(latestText, sender);
-              }, 150); // Fast translation start delay (under 200ms)
+        if (!shouldIgnore) {
+          setInputText((latestText) => {
+            const trimmed = latestText.trim();
+            if (trimmed) {
+              const sender = currentListeningUserRef.current;
+              if (sender) {
+                // Auto-translate on stop/complete
+                setTimeout(() => {
+                  translateAndSendMessageRef.current?.(trimmed, sender);
+                }, 100);
+                return ""; // clear it because we are sending it
+              }
             }
-          }
-          return "";
-        });
+            return latestText; // preserve manually or interim text if no submit
+          });
+        }
 
-        // Safe delayed start execution to completely prevent concurrent browser start errors
+        // Safe delayed startup recovery
         if (pendingStartUserRef.current) {
           const nextUser = pendingStartUserRef.current;
           pendingStartUserRef.current = null;
@@ -158,10 +176,10 @@ export default function ConversationView({
         }
       }
     };
-  }, []); // Run ONLY once on mount!
+  }, []);
 
   // Voice output (TTS) with native engine
-  const speakText = (text: string, lang: "en" | "sw", messageId: string) => {
+  const speakText = (text: string, lang: Language, messageId: string) => {
     if (!window.speechSynthesis) return;
 
     if (currentlySpeakingId === messageId) {
@@ -176,19 +194,17 @@ export default function ConversationView({
     const voices = window.speechSynthesis.getVoices();
     let targetVoice = null;
 
-    if (lang === "sw") {
-      // Swahili localized reader voice
-      targetVoice = voices.find(v => v.lang.startsWith("sw")) || null;
-      utterance.lang = "sw-KE";
-    } else {
-      // English reading voice
+    if (lang === Language.ENGLISH) {
       targetVoice = voices.find(v => v.lang.startsWith("en")) || null;
       utterance.lang = "en-US";
+    } else {
+      const config = LOCAL_LANGUAGES.find(l => l.value === lang);
+      const ttsLang = config ? config.ttsCode : "sw-KE";
+      targetVoice = voices.find(v => v.lang.startsWith(ttsLang.split("-")[0])) || null;
+      utterance.lang = ttsLang;
     }
 
-    if (targetVoice) {
-      utterance.voice = targetVoice;
-    }
+    if (targetVoice) utterance.voice = targetVoice;
 
     utterance.onend = () => setCurrentlySpeakingId(null);
     utterance.onerror = () => setCurrentlySpeakingId(null);
@@ -199,7 +215,7 @@ export default function ConversationView({
 
   const startListening = (user: "doctor" | "patient") => {
     if (!recognitionRef.current) {
-      setError("Speech recognition is not fully supported in this iframe. Try opening the preview in a new tab.");
+      setError("Speech recognition is not fully supported in this frame. Open the preview in a new tab.");
       return;
     }
 
@@ -213,7 +229,7 @@ export default function ConversationView({
     setInputText("");
     setInterimTranscript("");
 
-    // If already active, schedule deferred startup via pendingStartUserRef and abort current
+    // Schedule deferred startup if already active to prevent overlap errors
     if (isRecognitionActiveRef.current) {
       pendingStartUserRef.current = user;
       ignoreNextSubmitRef.current = true;
@@ -230,7 +246,8 @@ export default function ConversationView({
       setIsListeningEn(true);
       setIsListeningSw(false);
     } else {
-      recognitionRef.current.lang = "sw-TZ";
+      const config = LOCAL_LANGUAGES.find(l => l.value === selectedLocalLanguage);
+      recognitionRef.current.lang = config ? config.code : "sw-TZ";
       setIsListeningSw(true);
       setIsListeningEn(false);
     }
@@ -239,7 +256,6 @@ export default function ConversationView({
       recognitionRef.current.start();
     } catch (e: any) {
       console.error("Failed to start speech recognition:", e);
-      // Emergency recovery flow: If the browser was active behind the scenes, abort and defer 
       if (e?.message && e.message.includes("already started")) {
         pendingStartUserRef.current = user;
         ignoreNextSubmitRef.current = true;
@@ -269,8 +285,8 @@ export default function ConversationView({
     if (!textToSend.trim() || isTranslating) return;
 
     setError(null);
-    const sourceLang = sender === "doctor" ? Language.ENGLISH : Language.SWAHILI;
-    const targetLang = sender === "doctor" ? Language.SWAHILI : Language.ENGLISH;
+    const sourceLang = sender === "doctor" ? Language.ENGLISH : selectedLocalLanguage;
+    const targetLang = sender === "doctor" ? selectedLocalLanguage : Language.ENGLISH;
     
     setIsTranslating(true);
     try {
@@ -278,7 +294,8 @@ export default function ConversationView({
         textToSend,
         sourceLang,
         targetLang,
-        `Communication from ${sender} to ${sender === "doctor" ? "patient" : "doctor"}.`
+        `Communication from ${sender} in domain context ${domain}.`,
+        domain
       );
 
       const newMessage: Message = {
@@ -290,47 +307,290 @@ export default function ConversationView({
         timestamp: new Date(),
       };
 
-      onUpdateMessages([...messages, newMessage]);
+      const revisedMessages = [...messages, newMessage];
+      onUpdateMessages(revisedMessages);
 
-      // Speak translation out loud automatically on the target side for maximum life
+      // Speak translation out loud automatically on target side
       if (isAutoTtsEnabled) {
         if (sender === "doctor") {
-          speakText(translation, "sw", newMessage.id);
+          speakText(translation, selectedLocalLanguage, newMessage.id);
         } else {
-          speakText(translation, "en", newMessage.id);
+          speakText(translation, Language.ENGLISH, newMessage.id);
         }
       }
+
+      // Background Dialogue Extractors synchronizer: Extract card details on-the-fly!
+      try {
+        const parsed = await parseDialogue(revisedMessages, domain);
+        if (parsed && typeof parsed === "object") {
+          onUpdatePatientData(parsed);
+        }
+      } catch (parseErr) {
+        console.error("Dialogue extraction parse failed:", parseErr);
+      }
+
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : "An unexpected error occurred during translation.");
+      setError(err instanceof Error ? err.message : "Translation system interrupt.");
     } finally {
       setIsTranslating(false);
     }
   };
 
-  // Synchronize the ref with the latest render closure of translateAndSendMessage
   useEffect(() => {
     translateAndSendMessageRef.current = translateAndSendMessage;
   });
 
   const handleSendMessage = async (e: any) => {
     e.preventDefault();
-    if (!inputText.trim() || isTranslating) return;
-    const currentText = inputText;
+    const textToSend = inputText.trim() || interimTranscript.trim();
+    if (!textToSend || isTranslating) return;
+    
+    // Stop recording if active and ignore subsequent end trigger to prevent double send
+    if (isListeningEn || isListeningSw) {
+      ignoreNextSubmitRef.current = true;
+      stopListening();
+    }
+
     setInputText("");
-    await translateAndSendMessage(currentText, currentUser);
+    setInterimTranscript("");
+    await translateAndSendMessage(textToSend, currentUser);
   };
+
+  const getParticipantStatusLabels = () => {
+    switch (selectedLocalLanguage) {
+      case Language.LUGANDA:
+        return {
+          listeningText: "Wuliriza sasa... Tafadhali speak",
+          listeningStatus: "Omulwaddde / Omugenyi ayogera",
+          speakingOverlay: "Inasoma eddoboozi",
+          placeholder: "Wandiika ebyetaago byo wano...",
+          btnTitle: "Sema Luganda",
+          listeningBadge: "Omugenyi Ayogera",
+          translatingBg: "Inasafirisha Taarifa...",
+        };
+      case Language.KINYARWANDA:
+        return {
+          listeningText: "Uyu munsi... Tafadhali bireranye",
+          listeningStatus: "Umuvugizi uyu munsi",
+          speakingOverlay: "Iri kumva ijwi",
+          placeholder: "Andika ibyo ukeneye hano...",
+          btnTitle: "Vuga Kinyarwanda",
+          listeningBadge: "Umuvugizi Ari Kuvuga",
+          translatingBg: "Ihindura amagambo...",
+        };
+      case Language.SOMALI:
+        return {
+          listeningText: "Waan ku dhageysaneynaa... Fadlan hadal",
+          listeningStatus: "Qofka hadlaya",
+          speakingOverlay: "Maqalka codka",
+          placeholder: "Halkan ku qor waxaad u baahan tahay...",
+          btnTitle: "Ku hadal Somali",
+          listeningBadge: "Qofka weyn ee hadlaya",
+          translatingBg: "Turjumaya codka...",
+        };
+      case Language.LUO:
+        return {
+          listeningText: "Iwinji sasa... Winjowa maber",
+          listeningStatus: "Mawuono e romo",
+          speakingOverlay: "Iwinjo duol",
+          placeholder: "Ndik gigo maduong' ka...",
+          btnTitle: "Wuo Dholuo",
+          listeningBadge: "Jabed romo wuoyo",
+          translatingBg: "Inasafirisha...",
+        };
+      case Language.GIKUYU:
+        return {
+          listeningText: "Ndetheerekera rĩu... Aria uhoro",
+          listeningStatus: "Mũndũ nĩaraaria",
+          speakingOverlay: "Iraguthia mũgambo",
+          placeholder: "Andĩka mĩnyamaro yaku haha...",
+          btnTitle: "Aria na Gĩkũyũ",
+          listeningBadge: "Mũndũ nĩaraaria (AI)",
+          translatingBg: "Iragarũra rũthiomi...",
+        };
+      case Language.KALENJIN:
+        return {
+          listeningText: "Kasen rani... Ng'alal ng'al",
+          listeningStatus: "Chiito nee ng'alali",
+          speakingOverlay: "Kasen tuiyet",
+          placeholder: "Sir mwanzo koboto yu...",
+          btnTitle: "Ng'alal Kalenjin",
+          listeningBadge: "Chiito nee ng'alal (AI)",
+          translatingBg: "Iwetyi kulelei...",
+        };
+      default: // Swahili (default)
+        return {
+          listeningText: "Inasikiliza sasa... Tafadhali ongea",
+          listeningStatus: "Mshiriki anaongea",
+          speakingOverlay: "Inasoma sauti",
+          placeholder: "Andika dalili zako au bonyeza kipaza sauti hapa...",
+          btnTitle: "Sema Kiswahili",
+          listeningBadge: "Mshiriki Anaongea (Suala la AI)",
+          translatingBg: "Inasafirisha Taarifa za Tafsiri...",
+        };
+    }
+  };
+
+  const statusLabels = getParticipantStatusLabels();
+
+  // Domain labels mapper
+  const getDomainLabel = () => {
+    const getGreeting = () => {
+      if (domain === AppDomain.HOTEL) {
+        switch (selectedLocalLanguage) {
+          case Language.LUGANDA:
+            return "Otyanno! Tukusanyukidde mu kisulo kyaffe ekirungi. Otya erinnya lyo, era mwagala kusula naffe ennaku mmeka?";
+          case Language.KINYARWANDA:
+            return "Muraho! Murakaza neza mu nzu yacu y'ikiruhuko. Mwambwira izina ryanyu, kandi mwifuza kumara natwe iminsi ingahe?";
+          case Language.SOMALI:
+            return "Haye! Soo dhowow hudheelkayaga gaarka ah. Fadlan ii sheeg magacaaga iyo inta habeen ee aad nala joogi doonto?";
+          case Language.LUO:
+            return "Amosi! Karibu e hotela mwa mamit. Ndalo andiye nying'i kendo diher bet kodwa kuom ndalo adi?";
+          case Language.GIKUYU:
+            return "Wĩ mwega! Nĩ tũgũcookeria ngatho thĩinĩ wa nyũmba iitũ ya kĩĩmantha. Ndĩĩ kũũria rĩĩtwa rĩaku, na nĩ matukũ maigana ũngĩenda gũcooka na ithuĩ?";
+          case Language.KALENJIN:
+            return "Chomiet koret! Karibu bo jumba ne kibaa. Agoteran kainet neng'ung', ago moche ibete yu kebyisiek adĩ?";
+          default:
+            return "Hujambo! Karibu kwenye Jumba letu la kipekee. Tafadhali niambie jina lako na utapenda kukaa nasi kwa siku ngapi?";
+        }
+      } else if (domain === AppDomain.OFFICE) {
+        switch (selectedLocalLanguage) {
+          case Language.LUGANDA:
+            return "Otyanno! Tukusanyukidde mu nkiiko yaffe yaleero. Erinnya lyo ggwe ani, okola mu kitongole ki, era mulamwa ki ogwaleero?";
+          case Language.KINYARWANDA:
+            return "Muraho! Murakaza neza mu biganiro byacu by'uyu munsi. Nabaza izina ryanyu, ishami mukoramo, n'insanganyamatsiko y'uyu munsi?";
+          case Language.SOMALI:
+            return "Haye! Soo dhowow kulankayaga maanta. Fadlan ii sheeg magacaaga, waaxdaada, iyo mawduuca ugu weyn maanta?";
+          case Language.LUO:
+            return "Amosi! Karibu e romo mwa kawuono. Ang'o nying'i, muofisi mane, kendo ang'o wach maduong' kawuono?";
+          case Language.GIKUYU:
+            return "Wĩ mwega! Nĩ tũgũcookeria ngatho thĩinĩ wa kĩũngano giitũ gĩa rũũmĩrĩ. Rĩĩtwa rĩaku nũũ, ũrutaga wĩra wabicĩ ĩrĩrĩ, na nĩ kĩĩ kĩwarĩgĩra gĩatũũgathi rũũmĩrĩ?";
+          case Language.KALENJIN:
+            return "Chomiet koret! Sanyu keti korok bo uungano yetu rani. Kainet neng'ung' ku ng'oo, ibei ofisĩ nee, ago nee nee madaet mawa rani?";
+          default:
+            return "Hujambo! Karibu kwenye majadiliano yetu ya leo. Ningependa kufahamu jina lako, kitengo chako, na mada kuu leo?";
+        }
+      } else { // Clinic / Default
+        switch (selectedLocalLanguage) {
+          case Language.LUGANDA:
+            return "Otyanno! Tukusanyukidde mu ddwaliro lyaffe. Tafadhali naaba nkubuuza erinnya lyo, emyaka gyo, n'ekikuluma leero?";
+          case Language.KINYARWANDA:
+            return "Muraho! Murakaza neza mu ivuriro ryacu. Mwambwira izina ryanyu, imyaka yanyu, n'ikibazo mufite uyu munsi?";
+          case Language.SOMALI:
+            return "Haye! Soo dhowow rugta caafimaadkayaga. Fadlan ii sheeg magacaaga, da'daada, iyo waxa ku dhibaya maanta?";
+          case Language.LUO:
+            return "Amosi! Koyo kendo maber e kliniki mwa. Ndalo aniye nying'i, higni mari, kendo ang'o mamulo chunyi kawuono?";
+          case Language.GIKUYU:
+            return "Wĩ mwega! Nĩ tũgũcookeria ngatho tũrĩ thĩinĩ wa thibitarĩ. Ndĩĩ kũũria rĩĩtwa rĩaku, mĩaka yaku, na nĩ kĩĩ gĩgũthĩnyĩte rũũmĩrĩ?";
+          case Language.KALENJIN:
+            return "Chomiet koret! Sanyu keti korok bo kliniki. Nyoo abwa, agoteran kainet neng'ung', kebyisiek ku, ago nee nee name keti rani?";
+          default:
+            return "Hujambo! Karibu kwenye kliniki yetu. Tafadhali niambie jina lako, umri wako, na nini hasa kinakusumbua leo?";
+        }
+      }
+    };
+
+    switch (domain) {
+      case AppDomain.HOTEL:
+        return {
+          title: "Premium Lodging Sync",
+          agentTitle: "Desk Reception (English)",
+          clientTitlePrefix: "Guest Panel",
+          lblAutoGreet: `Greet Guest in ${selectedLocalLanguage} (Sauti ya AI)`,
+          lblManualGreet: "Start Speak English (Manual)",
+          welcomePrompt: getGreeting(),
+          placeholderEn: "Type instructions here or hold Voice...",
+          placeholderSw: "Andika mahitaji yako hapa..."
+        };
+      case AppDomain.OFFICE:
+        return {
+          title: "Bilingual Workspace Bridge",
+          agentTitle: "Moderator Host (English)",
+          clientTitlePrefix: "Participant Panel",
+          lblAutoGreet: `Welcome Presenter in ${selectedLocalLanguage} (Sauti ya AI)`,
+          lblManualGreet: "Host Workspace Brief (Manual)",
+          welcomePrompt: getGreeting(),
+          placeholderEn: "Type corporate agendas, task items here...",
+          placeholderSw: "Andika masuala yako ya kitaalamu hapa..."
+        };
+      default:
+        return {
+          title: "Clinical Translation Dashboard",
+          agentTitle: "Consulting Doctor (English)",
+          clientTitlePrefix: "Patient Intake Panel",
+          lblAutoGreet: `AI Patient ${selectedLocalLanguage} Greeting`,
+          lblManualGreet: "Start Doctor Intake (Manual)",
+          welcomePrompt: getGreeting(),
+          placeholderEn: "Type medical checks or instructions here...",
+          placeholderSw: "Andika dalili zako hapa au bonyeza kuongea..."
+        };
+    }
+  };
+
+  const labels = getDomainLabel();
+
+  // AI onboarding voice-assist player
+  const playVoiceFirstGreeting = () => {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+
+    setError(`AI Voice Greeting in ${selectedLocalLanguage} is playing out loud. Listen...`);
+
+    const utterance = new SpeechSynthesisUtterance(labels.welcomePrompt);
+    const config = LOCAL_LANGUAGES.find(l => l.value === selectedLocalLanguage);
+    const ttsLang = config ? config.ttsCode : "sw-KE";
+    utterance.lang = ttsLang;
+    
+    const voices = window.speechSynthesis.getVoices();
+    const matchingVoice = voices.find(v => v.lang.startsWith(ttsLang.split("-")[0])) || null;
+    if (matchingVoice) utterance.voice = matchingVoice;
+
+    utterance.onend = () => {
+      setError(null);
+      // Automatically trigger chosen mic listen block to make the interaction ultra smooth
+      startListening("patient");
+    };
+
+    utterance.onerror = () => {
+      setError(null);
+      startListening("patient");
+    };
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Skip wizard back-door trigger
+  const skipWizardIntake = () => {
+    onUpdatePatientData({
+      name: "Active Session Visitor",
+      age: "Not specified",
+      gender: "Not specified",
+      complaint: "Consultation initiated directly",
+      symptoms: [],
+    });
+  };
+
+  const isProfileEmpty = !patientData || (!patientData.name && !patientData.guestName && !patientData.employeeName);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Top Bar real-time parameters */}
-      <div className="bg-slate-50 border-b border-slate-200 px-8 py-3.5 flex items-center justify-between text-xs font-semibold text-slate-500 shrink-0">
-        <div className="flex items-center gap-2">
-          <Languages className="h-4 w-4 text-blue-600 animate-pulse" />
-          <span className="tracking-wider text-[11px] uppercase font-bold text-slate-600">Speech & Language Engine Active</span>
+      {/* Dynamic Connectivity Bar */}
+      <div className="bg-slate-50 border-b border-slate-200 px-8 py-3 flex flex-wrap gap-4 items-center justify-between text-xs font-semibold text-slate-500 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Languages className="h-4 w-4 text-slate-600 animate-pulse" />
+          <span className="tracking-wider text-[11px] uppercase font-bold text-slate-600">DualBridge AI Active • {labels.title}</span>
+          <a
+            href={window.location.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-2 bg-blue-600 hover:bg-blue-700 text-white font-extrabold uppercase text-[10px] tracking-wider px-3 py-1 rounded-lg shadow-sm transition-all flex items-center gap-1 shrink-0"
+          >
+            Launch in Full Tab ↗
+          </a>
         </div>
         <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          <label className="flex items-center gap-2 cursor-pointer select-none text-[10px] font-bold uppercase tracking-wider text-slate-500">
             <input 
               type="checkbox" 
               checked={isAutoTtsEnabled} 
@@ -341,7 +601,7 @@ export default function ConversationView({
                   setCurrentlySpeakingId(null);
                 }
               }} 
-              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+              className="rounded border-slate-300 text-slate-700 h-4 w-4 cursor-pointer"
             />
             <span>Auto-Speak Translations (TTS)</span>
           </label>
@@ -349,47 +609,79 @@ export default function ConversationView({
       </div>
 
       {error && (
-        <div className="bg-red-50 border-b border-red-100 p-3 flex items-center justify-between animate-in slide-in-from-top duration-300 shrink-0">
-          <div className="flex items-center gap-2 text-red-600 text-xs font-bold uppercase tracking-wider">
-            <span className="h-2 w-2 rounded-full bg-red-600 animate-pulse" />
-            Error: {(error.toLowerCase().includes("api key") || error.includes("GEMINI_API_KEY")) 
-              ? "API Key Configuration Required (Check Secrets Panel)" 
-              : error}
+        <div className="bg-amber-50 border-b border-amber-100 px-8 py-3 text-xs font-bold text-amber-700 flex flex-wrap justify-between items-center gap-3 shrink-0">
+          <span className="flex items-center gap-2">
+            <Activity className="w-3.5 h-3.5 animate-pulse" />
+            {error}
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <a 
+              href={window.location.href} 
+              target="_blank" 
+              rel="noopener noreferrer" 
+              className="bg-amber-600 hover:bg-amber-700 text-white px-3 py-1.5 rounded-xl text-[10px] font-extrabold uppercase tracking-widest transition-all"
+            >
+              Open In New Tab ↗
+            </a>
+            <button onClick={() => setError(null)} className="text-[10px] bg-amber-100 hover:bg-amber-200 px-2.5 py-1.5 rounded-xl uppercase font-black">Dismiss</button>
           </div>
-          <button onClick={() => setError(null)} className="text-[10px] bg-red-100 text-red-700 px-2 py-0.5 rounded font-black hover:bg-red-200 transition-colors">DISMISS</button>
         </div>
       )}
 
+      {/* AI Voice Onboarding Greet Panel */}
+      {isProfileEmpty && (
+        <div className="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-6 shadow-md border-b border-slate-700/50 shrink-0">
+          <div className="max-w-4xl mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h4 className="text-sm font-extrabold uppercase tracking-widest text-[#f59e0b] flex items-center gap-1.5 leading-none">
+                <Sparkles className="w-4 h-4 animate-bounce" />
+                AI Voice Intake Launcher
+              </h4>
+              <p className="text-xs text-slate-300">
+                Visitor has not submitted credentials. Welcome them in Swahili automatically with the AI speaker!
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={playVoiceFirstGreeting}
+                className="bg-[#f59e0b] hover:bg-amber-600 text-slate-900 px-5 py-2.5 rounded-xl font-extrabold uppercase text-[11px] tracking-wider shadow-md shadow-amber-950/20 transition-all flex items-center gap-2"
+              >
+                <Mic className="w-3.5 h-3.5" />
+                {labels.lblAutoGreet}
+              </button>
+              <button
+                onClick={skipWizardIntake}
+                className="bg-slate-700/50 hover:bg-slate-700 text-slate-300 hover:text-white px-4 py-2.5 rounded-xl font-bold uppercase text-[11px] tracking-wider border border-slate-600 transition-all"
+              >
+                Skip Auto-Greeting
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main Translation Interface Grid */}
       <div className="flex-grow grid grid-cols-2 gap-px bg-slate-200 overflow-hidden">
         {/* Doctor Interface (English) */}
         <section className="bg-white flex flex-col p-8 overflow-hidden">
-          <div className="flex items-center justify-between mb-6 shrink-0">
-            <h2 className="text-xs font-bold text-blue-600 uppercase tracking-widest px-1">
-              Doctor Interface (English)
+          <div className="flex items-center justify-between mb-4 shrink-0">
+            <h2 className="text-xs font-black text-slate-500 uppercase tracking-widest px-1">
+              {labels.agentTitle}
             </h2>
             <div className="flex items-center gap-2">
               {isListeningEn && (
                 <div className="flex items-center gap-1.5 bg-red-50 text-red-600 text-[10px] px-2 py-1 rounded-full font-bold uppercase tracking-wider animate-pulse">
                   <span className="h-1.5 w-1.5 rounded-full bg-red-600" />
                   Listening
-                  <div className="flex gap-0.5 items-end h-2 ml-1">
-                    <div className="w-0.5 bg-red-500 h-2 animate-bounce" style={{ animationDelay: '0.1s' }} />
-                    <div className="w-0.5 bg-red-500 h-3 animate-bounce" style={{ animationDelay: '0.2s' }} />
-                    <div className="w-0.5 bg-red-500 h-1.5 animate-bounce" style={{ animationDelay: '0.3s' }} />
-                  </div>
                 </div>
               )}
-              <span className={`text-[10px] px-2 py-1 rounded font-bold transition-all ${
-                currentUser === "doctor" ? "bg-blue-100 text-blue-600 shadow-sm" : "bg-slate-100 text-slate-500"
-              }`}>
-                {currentUser === "doctor" ? (isListeningEn ? "SPEAKING" : "ACTIVE") : "IDLE"}
-              </span>
             </div>
           </div>
 
+          {/* Message log */}
           <div 
             ref={scrollRefEn}
-            className="flex-grow space-y-6 overflow-y-auto mb-8 pr-4 scrollbar-hide"
+            className="flex-grow space-y-5 overflow-y-auto mb-6 pr-4 scrollbar-hide"
           >
             {messages.map((msg) => {
               const speakTargetText = msg.sender === "doctor" ? msg.text : msg.translation;
@@ -399,41 +691,59 @@ export default function ConversationView({
                 <div key={msg.id} className="flex flex-col items-end group/msg">
                   <div className="flex items-center gap-2.5 max-w-[90%] justify-end">
                     <button 
-                      onClick={() => speakText(speakTargetText, "en", msg.id)}
+                      onClick={() => speakText(speakTargetText, Language.ENGLISH, msg.id)}
                       className={`p-2 rounded-full transition-all border shrink-0 ${
                         isSpeaking 
-                          ? "bg-blue-500 text-white border-blue-400 shadow-sm scale-105" 
-                          : "text-slate-400 hover:text-blue-600 bg-white border-slate-100 hover:border-blue-100 hover:shadow-sm opacity-100 lg:opacity-0 group-hover/msg:opacity-100 focus:opacity-100"
+                          ? "bg-slate-900 text-white shadow-sm scale-105 border-slate-755" 
+                          : "text-slate-400 hover:text-slate-900 bg-white border-slate-100 hover:border-slate-300 opacity-100 lg:opacity-0 group-hover/msg:opacity-100"
                       }`}
-                      title={isSpeaking ? "Mute Speech" : "Speak translated dialogue (English)"}
                     >
                       <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
                     </button>
-                    <div className={`p-4 rounded-2xl rounded-tr-none text-sm leading-relaxed shadow-sm transition-all ${
+                    <div className={`p-4 rounded-2xl rounded-tr-none text-sm leading-relaxed shadow-xs transition-all ${
                       msg.sender === "doctor" 
-                        ? "bg-slate-100 text-slate-700 rounded-2xl rounded-tr-none border border-slate-200/50" 
-                        : "bg-blue-50 text-blue-800 border border-blue-100"
+                        ? "bg-slate-100 text-slate-700" 
+                        : "bg-slate-50 text-slate-800 border border-slate-150"
                     }`}>
                       {speakTargetText}
                     </div>
                   </div>
-                  <span className="text-[10px] text-slate-400 mt-1 uppercase font-bold pr-1 select-none">
+                  <span className="text-[9px] text-slate-450 mt-1 uppercase font-bold pr-1 select-none">
                     {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </span>
                 </div>
               );
             })}
+
+            {/* LIVE ENGLISH SPEECH BUBBLE OVERLAY */}
+            {isListeningEn && (
+              <div className="flex flex-col items-end animate-pulse">
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-ping shrink-0" />
+                  <div className="bg-blue-50/70 text-blue-800 border-2 border-dashed border-blue-200 p-4 rounded-2xl rounded-tr-none text-sm leading-relaxed">
+                    {interimTranscript ? (
+                      <span className="text-blue-900 font-semibold">Live speaking: "{interimTranscript}"</span>
+                    ) : (
+                      <span className="text-slate-400 italic">Listening... Speak now</span>
+                    )}
+                  </div>
+                </div>
+                <span className="text-[10px] text-blue-500 font-bold uppercase mt-1 tracking-wider">Voice Capture Active</span>
+              </div>
+            )}
+
             {isTranslating && currentUser === "doctor" && (
               <div className="flex justify-end pr-2 animate-pulse">
-                <span className="text-[10px] text-blue-500 font-bold uppercase tracking-wider">Processing Swahili Translation...</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Syncing Swahili Dialogue...</span>
               </div>
             )}
           </div>
 
+          {/* Typing area */}
           <div className="relative shrink-0">
             <textarea
-              className={`w-full p-4 pb-14 border rounded-xl text-sm focus:outline-none transition-all bg-slate-50 resize-none ${
-                currentUser === "doctor" ? "border-blue-400 ring-2 ring-blue-50 bg-white" : "border-slate-300"
+              className={`w-full p-4 pb-14 border rounded-xl text-sm focus:outline-none transition-all resize-none bg-slate-50/50 ${
+                currentUser === "doctor" ? "border-slate-800 ring-4 ring-slate-100 bg-white" : "border-slate-200"
               }`}
               rows={3}
               value={isListeningEn ? (inputText || interimTranscript) : (currentUser === "doctor" ? inputText : "")}
@@ -444,16 +754,9 @@ export default function ConversationView({
                 }
               }}
               onFocus={() => setCurrentUser("doctor")}
-              placeholder={isListeningEn ? "🎙️ Listening... keep speaking" : "Type instructions here or tap Voice to speak..."}
+              placeholder={isListeningEn ? "🎙️ Recording active... keep speaking" : labels.placeholderEn}
               disabled={isListeningEn}
             />
-            
-            {/* Real-time word feedback line when speaking */}
-            {isListeningEn && interimTranscript && (
-              <div className="absolute left-4 bottom-14 right-4 text-xs italic text-blue-500 font-medium truncate pointer-events-none">
-                Capturing: "{interimTranscript}"
-              </div>
-            )}
 
             <div className="absolute bottom-3 right-3 flex items-center gap-2">
               <button
@@ -462,17 +765,16 @@ export default function ConversationView({
                 className={`p-2.5 rounded-lg shadow-sm transition-all flex items-center justify-center border ${
                   isListeningEn 
                     ? "bg-red-500 border-red-400 text-white animate-pulse hover:bg-red-600" 
-                    : "bg-white text-slate-600 hover:text-blue-600 hover:bg-blue-50 border-slate-200"
+                    : "bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border-slate-200"
                 }`}
-                title={isListeningEn ? "Stop speaking" : "Speak English voice input"}
+                title={isListeningEn ? "Stop feedback" : "Record English Speech"}
               >
                 {isListeningEn ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </button>
               <button 
                 onClick={handleSendMessage}
                 disabled={currentUser !== "doctor" || !inputText.trim() || isTranslating || isListeningEn}
-                className="p-2.5 bg-blue-600 text-white border border-blue-500 rounded-lg shadow-sm hover:bg-blue-700 disabled:opacity-40 transition-all flex items-center justify-center"
-                title="Send translating message"
+                className="p-2.5 bg-slate-900 text-white border border-slate-800 rounded-lg shadow-sm hover:bg-slate-800 disabled:opacity-40 transition-all flex items-center justify-center"
               >
                 <Send className="h-4 w-4" />
               </button>
@@ -480,35 +782,44 @@ export default function ConversationView({
           </div>
         </section>
 
-        {/* Patient Interface (Swahili) */}
+        {/* Patient/Guest Interface (Dynamic Local Language) */}
         <section className="bg-slate-50 flex flex-col p-8 overflow-hidden border-l border-slate-200">
-          <div className="flex items-center justify-between mb-6 shrink-0">
-            <h2 className="text-xs font-bold text-emerald-600 uppercase tracking-widest">
-              Patient Interface (Swahili)
-            </h2>
-            <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap gap-2 items-center justify-between mb-4 shrink-0">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xs font-black text-slate-500 uppercase tracking-widest">
+                {labels.clientTitlePrefix}
+              </h2>
+              <select
+                value={selectedLocalLanguage}
+                onChange={(e) => {
+                  setSelectedLocalLanguage(e.target.value as Language);
+                  if (scrollRefSw.current) {
+                    scrollRefSw.current.scrollTop = 0;
+                  }
+                }}
+                className="bg-white border border-slate-200 text-xs font-bold text-slate-700 px-2 py-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 cursor-pointer shadow-xs"
+              >
+                {LOCAL_LANGUAGES.map((l) => (
+                  <option key={l.value} value={l.value}>
+                    {l.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
               {isListeningSw && (
                 <div className="flex items-center gap-1.5 bg-red-50 text-red-600 text-[10px] px-2 py-1 rounded-full font-bold uppercase tracking-wider animate-pulse">
                   <span className="h-1.5 w-1.5 rounded-full bg-red-600" />
-                  Inasikiliza
-                  <div className="flex gap-0.5 items-end h-2 ml-1">
-                    <div className="w-0.5 bg-red-500 h-2 animate-bounce" style={{ animationDelay: '0.1s' }} />
-                    <div className="w-0.5 bg-red-500 h-3 animate-bounce" style={{ animationDelay: '0.2s' }} />
-                    <div className="w-0.5 bg-red-500 h-1.5 animate-bounce" style={{ animationDelay: '0.3s' }} />
-                  </div>
+                  {statusLabels.listeningStatus}
                 </div>
               )}
-              <span className={`text-[10px] px-2 py-1 rounded font-bold transition-all ${
-                currentUser === "patient" ? "bg-emerald-100 text-emerald-600 shadow-sm" : "bg-slate-100 text-slate-500"
-              }`}>
-                {currentUser === "patient" ? (isListeningSw ? "MGONJWA ANAONGEA" : "ACTIVE") : "IDLE"}
-              </span>
             </div>
           </div>
 
+          {/* Localized logs window */}
           <div 
              ref={scrollRefSw}
-             className="flex-grow space-y-6 overflow-y-auto mb-8 pr-4"
+             className="flex-grow space-y-5 overflow-y-auto mb-6 pr-4 scrollbar-hide"
           >
             {messages.map((msg) => {
               const speakTargetText = msg.sender === "doctor" ? msg.translation : msg.text;
@@ -517,42 +828,60 @@ export default function ConversationView({
               return (
                 <div key={msg.id} className="flex flex-col items-start group/msg">
                   <div className="flex items-center gap-2.5 max-w-[90%]">
-                    <div className={`p-4 rounded-2xl rounded-tl-none border text-sm leading-relaxed shadow-sm transition-all ${
+                    <div className={`p-4 rounded-2xl rounded-tl-none border text-sm leading-relaxed shadow-xs transition-all ${
                       msg.sender === "doctor" 
-                        ? "bg-white border-slate-200 text-slate-800" 
-                        : "bg-emerald-600 text-white border-emerald-500"
+                        ? "bg-white border-slate-150 text-slate-800" 
+                        : "bg-slate-800 text-white border-slate-700"
                     }`}>
                       {speakTargetText}
                     </div>
                     <button 
-                      onClick={() => speakText(speakTargetText, "sw", msg.id)}
+                      onClick={() => speakText(speakTargetText, selectedLocalLanguage, msg.id)}
                       className={`p-2 rounded-full transition-all border shrink-0 ${
                         isSpeaking 
-                          ? "bg-emerald-500 text-white border-emerald-400 shadow-sm scale-105" 
-                          : "text-slate-400 hover:text-emerald-600 bg-white border-slate-100 hover:border-emerald-100 hover:shadow-sm opacity-100 lg:opacity-0 group-hover/msg:opacity-100 focus:opacity-100"
+                          ? "bg-slate-800 text-white shadow-sm scale-105 border-slate-700" 
+                          : "text-slate-400 hover:text-slate-900 bg-white border-slate-100 hover:border-slate-300 opacity-100 lg:opacity-0 group-hover/msg:opacity-100"
                       }`}
-                      title={isSpeaking ? "Nyamaza" : "Soma kwa sauti (Swahili)"}
                     >
                       <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
                     </button>
                   </div>
-                  <span className="text-[10px] text-slate-400 mt-1 uppercase font-bold pl-1 select-none">
-                    {msg.sender === "patient" ? "Imetambuliwa: Kiswahili" : "Msaada wa Tafsiri"}
+                  <span className="text-[9px] text-slate-450 mt-1 uppercase font-bold pl-1 select-none">
+                    {msg.sender === "patient" ? selectedLocalLanguage : "Vocal Translation"}
                   </span>
                 </div>
               );
             })}
+
+            {/* LIVE REGIONAL SPEECH BUBBLE OVERLAY */}
+            {isListeningSw && (
+              <div className="flex flex-col items-start animate-pulse">
+                <div className="flex items-center gap-2 max-w-[90%]">
+                  <div className="bg-emerald-50/70 text-emerald-800 border-2 border-dashed border-emerald-200 p-4 rounded-2xl rounded-tl-none text-sm leading-relaxed">
+                    {interimTranscript ? (
+                      <span className="text-emerald-900 font-semibold font-mono">{statusLabels.speakingOverlay}: "{interimTranscript}"</span>
+                    ) : (
+                      <span className="text-slate-400 italic">{statusLabels.listeningText}</span>
+                    )}
+                  </div>
+                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                </div>
+                <span className="text-[10px] text-emerald-500 font-extrabold uppercase mt-1 tracking-wider">{statusLabels.listeningBadge}</span>
+              </div>
+            )}
+
             {isTranslating && currentUser === "patient" && (
               <div className="flex justify-start pl-2 animate-pulse">
-                <span className="text-[10px] text-emerald-600 font-bold uppercase tracking-wider">Inatafsiri kwa Kiingereza...</span>
+                <span className="text-[10px] text-slate-350 font-bold uppercase tracking-wider">{statusLabels.translatingBg}</span>
               </div>
             )}
           </div>
 
+          {/* Input field */}
           <div className="relative shrink-0">
             <textarea
-              className={`w-full p-4 pb-14 border rounded-xl text-sm focus:outline-none transition-all bg-white resize-none ${
-                currentUser === "patient" ? "border-emerald-500 ring-2 ring-emerald-50 bg-white" : "border-slate-300"
+              className={`w-full p-4 pb-14 border rounded-xl text-sm focus:outline-none transition-all resize-none ${
+                currentUser === "patient" ? "border-slate-800 ring-4 ring-slate-150 bg-white" : "border-slate-200"
               }`}
               rows={3}
               value={isListeningSw ? (inputText || interimTranscript) : (currentUser === "patient" ? inputText : "")}
@@ -563,16 +892,9 @@ export default function ConversationView({
                 }
               }}
               onFocus={() => setCurrentUser("patient")}
-              placeholder={isListeningSw ? "🎙️ Inasikiliza... endelea kuongea" : "Andika hapa au bonyeza kipaza sauti..."}
+              placeholder={isListeningSw ? `🎙️ ${statusLabels.speakingOverlay}...` : statusLabels.placeholder}
               disabled={isListeningSw}
             />
-
-            {/* Real-time Swahili word feedback line when speaking */}
-            {isListeningSw && interimTranscript && (
-              <div className="absolute left-4 bottom-14 right-4 text-xs italic text-emerald-600 font-medium truncate pointer-events-none">
-                Inasoma: "{interimTranscript}"
-              </div>
-            )}
 
             <div className="absolute bottom-3 right-3 flex items-center gap-2">
               <button
@@ -581,17 +903,16 @@ export default function ConversationView({
                 className={`p-2.5 rounded-lg shadow-sm transition-all flex items-center justify-center border ${
                   isListeningSw 
                     ? "bg-red-500 border-red-400 text-white animate-pulse hover:bg-red-600" 
-                    : "bg-white text-slate-600 hover:text-emerald-600 hover:bg-emerald-50 border-slate-200"
+                    : "bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border-slate-200"
                 }`}
-                title={isListeningSw ? "Acha kusikiliza" : "Sema kwa Kiswahili"}
+                title={isListeningSw ? "Stop" : statusLabels.btnTitle}
               >
                 {isListeningSw ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </button>
               <button 
                 onClick={handleSendMessage}
                 disabled={currentUser !== "patient" || !inputText.trim() || isTranslating || isListeningSw}
-                className="p-2.5 bg-emerald-600 text-white border border-emerald-500 rounded-lg shadow-sm hover:bg-emerald-700 disabled:opacity-40 transition-all flex items-center justify-center"
-                title="Tuma Ujumbe wa Tafsiri"
+                className="p-2.5 bg-slate-900 text-white border border-slate-800 rounded-lg shadow-sm hover:bg-slate-800 disabled:opacity-40 transition-all flex items-center justify-center"
               >
                 <Languages className="h-4 w-4" />
               </button>

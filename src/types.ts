@@ -1,15 +1,42 @@
 export enum Language {
   ENGLISH = "English",
-  SWAHILI = "Swahili"
+  SWAHILI = "Swahili",
+  LUGANDA = "Luganda",
+  KINYARWANDA = "Kinyarwanda",
+  SOMALI = "Somali",
+  LUO = "Luo",
+  GIKUYU = "Kikuyu",
+  KALENJIN = "Kalenjin"
+}
+
+export enum AppDomain {
+  CLINIC = "clinic",
+  HOTEL = "hotel",
+  OFFICE = "office"
 }
 
 export interface PatientData {
+  // Medical / Common Fields
   name: string;
   age: string;
   gender: string;
   complaint: string;
   symptoms: string[];
   intakeNotes?: string;
+
+  // Hospitality Fields
+  guestName?: string;
+  duration?: string;
+  roomPreference?: string;
+  budgetCategory?: string;
+  specialRequests?: string;
+
+  // Office Fields
+  employeeName?: string;
+  department?: string;
+  meetingSubject?: string;
+  workContext?: string;
+  actionItems?: string[];
 }
 
 export interface Message {
