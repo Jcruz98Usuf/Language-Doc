@@ -135,21 +135,40 @@ export interface DecodeOptions {
  * clear error instead of a bogus transcript.
  */
 export function decodeAudioPayload(body: Buffer | undefined, options: DecodeOptions = {}): PcmAudio {
-  if (!body || body.length === 0) {
+  // A body parser whose content-type did not match hands the route an empty
+  // object, not a Buffer. Reject that shape here so the answer is a clean 400
+  // "bad audio" instead of a TypeError deep inside decoding (which surfaced as
+  // an opaque 500 and hid the real cause: an unreadable request body).
+  const received: unknown = body;
+  if (!(received instanceof Uint8Array)) {
+    const missing = received === undefined || received === null;
+    throw new SttError(
+      "bad-audio",
+      missing
+        ? "No audio was submitted."
+        : "Audio was not submitted in a readable form. Send raw PCM or a WAVE file."
+    );
+  }
+  // Buffer extends Uint8Array; express.raw always supplies a Buffer, but a view
+  // over a larger ArrayBuffer is normalised so downstream reads stay in range.
+  const payload: Buffer = Buffer.isBuffer(received)
+    ? received
+    : Buffer.from(received.buffer, received.byteOffset, received.byteLength);
+  if (payload.length === 0) {
     throw new SttError("bad-audio", "No audio was submitted.");
   }
 
   let samples: Float32Array;
   let sourceRate: number;
 
-  if (looksLikeWav(body)) {
-    const wav = decodeWav(body);
+  if (looksLikeWav(payload)) {
+    const wav = decodeWav(payload);
     samples = toMono(wav.samples, wav.channels);
     sourceRate = wav.sampleRate;
   } else {
     // Raw PCM: mono, little-endian, 16-bit signed (the browser contract).
-    const even = body.length - (body.length % 2);
-    samples = pcm16ToFloat(new Int16Array(body.buffer.slice(body.byteOffset, body.byteOffset + even)));
+    const even = payload.length - (payload.length % 2);
+    samples = pcm16ToFloat(new Int16Array(payload.buffer.slice(payload.byteOffset, payload.byteOffset + even)));
     sourceRate = options.declaredRate ?? TARGET_SAMPLE_RATE;
   }
 

@@ -76,3 +76,24 @@ Synthesised speech is cleaner than human speech in a noisy clinic or lobby, and 
 French or Swahili voice is installed on this machine, so the multilingual path is
 plumbed but **not** measured here. Passing this benchmark is not a statement of
 medical accuracy; real transcripts still need human review.
+
+## Live endpoint check (not a substitute for the above)
+
+The endpoint behind the laptop mic was checked against the running server, using a
+generated clip as the input (a real microphone test is still owed by a human):
+
+| Check | Result |
+|---|---|
+| `POST /api/transcribe` with a WAVE body | `200` + transcript, `stt-whisper-onnx` / `Xenova/whisper-base.en`, 6.25 s audio in 6.5-10.2 s |
+| Unmatched `Content-Type` (empty request object reaches the decoder) | `400 bad-audio` - "Audio was not submitted in a readable form." |
+| No body at all | `400 bad-audio` - same honest message |
+| 16 bytes of PCM | `400 too-short` - "Hold the mic a little longer." |
+| Unsupported language (Luganda) | `400 unsupported-language` - "Please type the message instead." |
+| TCP connections held by the server process during a cold transcription | none outside `127.0.0.1` - the weights came from the local cache, no download and no cloud call |
+
+The first four rows originally behaved differently: a body the raw parser did not
+claim reached the decoder as `{}`, decoding threw a `TypeError`, and the client got
+an opaque `500 Local transcription failed.` The decoder now rejects that shape up
+front, so every input problem is a `400` the UI can show verbatim (see
+`src/server/services/stt/audio.ts`).
+
