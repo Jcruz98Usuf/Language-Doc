@@ -6,3 +6,15 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# local MT model cache (downloaded once, then fully offline)
+benchmarks/translation/.hf-cache/
+
+
+# local run artifacts
+*.pid
+
+
+# local STT benchmark audio + reports (generated locally with the Windows SAPI voices)
+benchmarks/stt/audio/
+benchmarks/stt/results/

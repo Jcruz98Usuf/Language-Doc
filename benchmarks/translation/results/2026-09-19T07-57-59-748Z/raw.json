@@ -1,0 +1,441 @@
+[
+  {
+    "candidate": "ollama:qwen3:1.7b",
+    "model": "qwen3:1.7b",
+    "runtime": "Ollama (chat)",
+    "license": "Apache-2.0",
+    "direction": "English -> Swahili",
+    "warmupMs": 9147,
+    "cases": [
+      {
+        "id": "en-greeting",
+        "category": "greeting",
+        "source": "Good morning, doctor.",
+        "reference": "Habari ya asubuhi, daktari.",
+        "output": "Salaamu anaka, doktor.",
+        "latencyMs": 1719,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-conversation",
+        "category": "conversation",
+        "source": "How are you feeling today?",
+        "reference": "Unajisikia vipi leo?",
+        "output": "Kaka kama na kiasi ya matokeo?",
+        "latencyMs": 2363,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-numbers",
+        "category": "numbers",
+        "source": "The bill is 15,000 shillings for three days.",
+        "reference": "Bili ni shilingi 15,000 kwa siku tatu.",
+        "output": "Mkaka ya mali kati ya 15,000 shillinga kwa kiasi na 3 dani.",
+        "latencyMs": 4188,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-dates",
+        "category": "dates",
+        "source": "Your appointment is on 12 March 2026.",
+        "reference": "Miadi yako ni tarehe 12 Machi 2026.",
+        "output": "Sisi kaka ya apokusi na 12 martsi 2026.",
+        "latencyMs": 3254,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "Machi|March"
+        ],
+        "error": null
+      },
+      {
+        "id": "en-names",
+        "category": "names",
+        "source": "Please call Nurse Amina to room four.",
+        "reference": "Tafadhali mwite muuguzi Amina kwenye chumba cha nne.",
+        "output": "Siku kifungu Njia na matokeo 4.",
+        "latencyMs": 3178,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "Amina"
+        ],
+        "error": null
+      },
+      {
+        "id": "en-clinic",
+        "category": "clinic",
+        "source": "I have been taking this medicine for five days but the pain has not stopped.",
+        "reference": "Nimekuwa nikichukua dawa hii kwa siku tano lakini maumivu hayajaisha.",
+        "output": "Aku kisasa mazuri ya medikinzi na 5 daga, lakini mbalimbali ni kama kama.",
+        "latencyMs": 4937,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-symptoms",
+        "category": "symptoms",
+        "source": "My chest feels heavy and I am short of breath.",
+        "reference": "Nahisi kifua changu kimezito na ninapumua kwa shida.",
+        "output": "Mwaka mimi kila na kifaa ya kisasa na kifaa ya kamaa.",
+        "latencyMs": 3914,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-medication",
+        "category": "medication",
+        "source": "Take one tablet of paracetamol 500 mg twice a day after meals.",
+        "reference": "Chukua kidonge kimoja cha paracetamol 500 mg mara mbili kwa siku baada ya mlo.",
+        "output": "Kaka na kila tablè ya paracetamol 500 mg mbili kama kiasi kati kamilia.",
+        "latencyMs": 4710,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-hotel",
+        "category": "hotel",
+        "source": "I would like to book a double room for two nights with breakfast included.",
+        "reference": "Ningependa kupanga chumba cha watu wawili kwa siku mbili pamoja na kiamshakinywa.",
+        "output": "Mikoko kwa matokeo ya 2 nadii na kila kiasi kati ya kiasi kati ya kiasi.",
+        "latencyMs": 4889,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-office",
+        "category": "office",
+        "source": "The meeting is on Monday, please send me the report before then.",
+        "reference": "Mkutano ni Jumatatu, tafadhali nitumie ripoti kabla ya hapo.",
+        "output": "Mkaka ya matokeo kwa mbili 1, sana kuwafanisha mkono yako kama kiasi.",
+        "latencyMs": 4760,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "Jumatatu|Monday"
+        ],
+        "error": null
+      },
+      {
+        "id": "en-question",
+        "category": "question",
+        "source": "Do you understand what I am saying?",
+        "reference": "Unaelewa ninachosema?",
+        "output": "Maka mungumu kwa mwanamko ya mbalimbali?",
+        "latencyMs": 2957,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-negation",
+        "category": "negation",
+        "source": "I am not allowed to eat food with salt.",
+        "reference": "Siruhusiwi kula chakula chenye chumvi.",
+        "output": "Mikoko kwa matokeo kati ya matokeo kila kiasi.",
+        "latencyMs": 3499,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-instruction",
+        "category": "instruction",
+        "source": "Open your mouth and breathe in deeply.",
+        "reference": "Fungua mdomo wako na kuvuta pumzi kwa kina.",
+        "output": "Bakamka na kaka wa mwanafani ya kila kifaa na kamaa.",
+        "latencyMs": 3665,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-clinic-2",
+        "category": "clinic",
+        "source": "The doctor will see you after the nurse checks your blood pressure.",
+        "reference": "Daktari atakuone baada ya muuguzi kupima shinikizo lako la damu.",
+        "output": "Njia kila mwanataka kisha na nchi ya mbali wana mwalimu kiasi mbalimbali yangu.",
+        "latencyMs": 5048,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      }
+    ]
+  },
+  {
+    "candidate": "ollama:qwen3:1.7b",
+    "model": "qwen3:1.7b",
+    "runtime": "Ollama (chat)",
+    "license": "Apache-2.0",
+    "direction": "Swahili -> English",
+    "warmupMs": 1540,
+    "cases": [
+      {
+        "id": "sw-greeting",
+        "category": "greeting",
+        "source": "Habari ya jioni, daktari.",
+        "reference": "Good evening, doctor.",
+        "output": "Message from doctor.",
+        "latencyMs": 1582,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-conversation",
+        "category": "conversation",
+        "source": "Mtoto ana homa na kikohozi kuanzia jana.",
+        "reference": "The child has had a fever and a cough since yesterday.",
+        "output": "A child is born with a heart defect.",
+        "latencyMs": 2414,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-numbers",
+        "category": "numbers",
+        "source": "Nimepoteza kadi yangu ya bima, namba yake ni 2233.",
+        "reference": "I have lost my insurance card; its number is 2233.",
+        "output": "This patient's medical record number is 2233.",
+        "latencyMs": 2909,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-dates",
+        "category": "dates",
+        "source": "Nilianza kuhisi maumivu tarehe 9 Oktoba.",
+        "reference": "I started feeling the pain on 9 October.",
+        "output": "Not prescribed for use in adults over 18 years of age.",
+        "latencyMs": 2866,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "9",
+          "October|Oktoba"
+        ],
+        "error": null
+      },
+      {
+        "id": "sw-names",
+        "category": "names",
+        "source": "Mama Fatuma anahitaji dawa yake muda wowote.",
+        "reference": "Fatuma's mother needs her medicine at any time.",
+        "output": "Mother Fatuma is giving her young child medicine.",
+        "latencyMs": 2324,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-clinic",
+        "category": "clinic",
+        "source": "Nimekuwa nikichukua dawa hii kwa wiki moja lakini bado nahisi maumivu ya kichwa.",
+        "reference": "I have been taking this medicine for one week, but I still have a headache.",
+        "output": "Although this medicine was prescribed by a doctor, but he did not take it.",
+        "latencyMs": 3845,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-symptoms",
+        "category": "symptoms",
+        "source": "Koo linauma na kichwa kinauma sana.",
+        "reference": "My throat hurts and my head hurts badly.",
+        "output": "He will be admitted to the hospital for treatment.",
+        "latencyMs": 2344,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-medication",
+        "category": "medication",
+        "source": "Dozi ni kapsuli moja ya amoksilini 250 mg mara tatu kwa siku.",
+        "reference": "The dose is one capsule of amoxicillin 250 mg three times a day.",
+        "output": "This is a 250-mg antibiotic capsule taken once daily.",
+        "latencyMs": 3242,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "amoxicillin|amoksilini"
+        ],
+        "error": null
+      },
+      {
+        "id": "sw-hotel",
+        "category": "hotel",
+        "source": "Niwekee chumba chenye mwonekano wa bahari, na bei gani kwa siku?",
+        "reference": "Please give me a room with an ocean view, and what is the price per day?",
+        "output": "When will you be able to go out in the sea?",
+        "latencyMs": 2892,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-office",
+        "category": "office",
+        "source": "Mkutano wa Jumatatu umehairishwa hadi Ijumaa.",
+        "reference": "Monday's meeting has been postponed to Friday.",
+        "output": "The patient was admitted to the hospital.",
+        "latencyMs": 2213,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [
+          "Monday|Jumatatu",
+          "Friday|Ijumaa"
+        ],
+        "error": null
+      },
+      {
+        "id": "sw-question",
+        "category": "question",
+        "source": "Unaelewa ninachosema?",
+        "reference": "Do you understand what I am saying?",
+        "output": "What is the purpose of this examination?",
+        "latencyMs": 1936,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-negation",
+        "category": "negation",
+        "source": "Sitakuja kwa mkutano kwa sababu ni mgonjwa.",
+        "reference": "I will not come to the meeting because I am sick.",
+        "output": "This is a mistake caused by something.",
+        "latencyMs": 2267,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "sw-instruction",
+        "category": "instruction",
+        "source": "Pima shinikizo la damu na halijoto ya mwili.",
+        "reference": "Measure the blood pressure and the body temperature.",
+        "output": "Blood pressure readings for a patient and their blood sugar levels.",
+        "latencyMs": 2673,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      }
+    ]
+  }
+]

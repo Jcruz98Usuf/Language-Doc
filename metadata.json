@@ -1,6 +1,6 @@
 {
   "name": "Language Doctor",
-  "description": "AI-powered medical translation and patient intake assistant for English and Swahili.",
+  "description": "Local-first bilingual translation and intake assistant (clinic, hotel and office) running entirely on a local Ollama model.",
   "requestFramePermissions": ["microphone"],
-  "majorCapabilities": ["AI Translation", "Medical Intake", "Structured Summaries"]
+  "majorCapabilities": ["Local AI Translation", "Voice First Intake", "Structured Summaries"]
 }

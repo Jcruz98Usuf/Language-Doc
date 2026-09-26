@@ -1,15 +1,15 @@
 import { RefreshCw, GraduationCap, Sparkles } from "lucide-react";
-import { AppMode, PatientData, AppDomain } from "../types";
+import { AppMode, DomainProfile, AppDomain } from "../types";
 
 interface HeaderProps {
   mode: AppMode;
-  patientData: PatientData | null;
+  profile: DomainProfile | null;
   domain: AppDomain;
   onReset: () => void;
   onEndSession?: () => void;
 }
 
-export default function Header({ mode, patientData, domain, onReset, onEndSession }: HeaderProps) {
+export default function Header({ mode, profile, domain, onReset, onEndSession }: HeaderProps) {
   const getDomainTheme = () => {
     switch (domain) {
       case AppDomain.HOTEL:
@@ -41,22 +41,22 @@ export default function Header({ mode, patientData, domain, onReset, onEndSessio
 
   const theme = getDomainTheme();
 
-  const getPrimaryValue = () => {
-    if (!patientData) return null;
-    if (domain === AppDomain.HOTEL) return patientData.guestName || patientData.name;
-    if (domain === AppDomain.OFFICE) return patientData.employeeName || patientData.name;
-    return patientData.name;
-  };
+  // Phase 2: narrow the discriminated union instead of guessing which field
+  // holds what (no more `guestName || name`, no more `duration || age`).
+  const patient = profile?.domain === AppDomain.CLINIC ? profile : null;
+  const guest = profile?.domain === AppDomain.HOTEL ? profile : null;
+  const office = profile?.domain === AppDomain.OFFICE ? profile : null;
 
-  const getSecondaryValue = () => {
-    if (!patientData) return null;
-    if (domain === AppDomain.HOTEL) return patientData.duration || patientData.age || "Not specified";
-    if (domain === AppDomain.OFFICE) return patientData.department || "General Team";
-    return patientData.age ? `${patientData.age} yrs` : "Not specified";
-  };
-
-  const primaryVal = getPrimaryValue();
-  const secondaryVal = getSecondaryValue();
+  const primaryVal = guest?.guestName || patient?.name || office?.employeeName || null;
+  const secondaryVal = patient
+    ? patient.age
+      ? `${patient.age} yrs`
+      : "Not specified"
+    : guest
+      ? guest.duration || "Not specified"
+      : office
+        ? office.department || "General Team"
+        : null;
 
   return (
     <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-8 sticky top-0 z-40 shrink-0">

@@ -3,38 +3,285 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { io, type Socket } from "socket.io-client";
 import { ArrowRight, Stethoscope, ChevronRight, Hotel, Briefcase, Sparkles } from "lucide-react";
-import { AppMode, PatientData, Message, AppDomain } from "./types";
+import { AppMode, DomainProfile, Language, Message, AppDomain, PatientProfile } from "./types";
+import { activeProfileFor, mergeDomainProfile } from "./profile";
+import { createSession, endSession, type SessionHandle } from "./services/api";
 import IntakeForm from "./components/IntakeForm";
 import ConversationView from "./components/ConversationView";
 import SummaryView from "./components/SummaryView";
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
+import PrivateSessionHost from "./components/PrivateSessionHost";
+import PrivateSessionParticipant from "./components/PrivateSessionParticipant";
+
+/** Normalises a Message that arrived over the wire (JSON turns dates into strings). */
+function asWireMessage(value: unknown): Message | null {
+  if (!value || typeof value !== "object") return null;
+  const message = value as Partial<Message>;
+  if (typeof message.id !== "string" || typeof message.text !== "string") return null;
+  if (typeof message.translation !== "string") return null;
+  return {
+    id: message.id,
+    text: message.text,
+    sender: message.sender === "doctor" ? "doctor" : "patient",
+    originalText: typeof message.originalText === "string" ? message.originalText : message.text,
+    translation: message.translation,
+    timestamp: new Date(message.timestamp ?? Date.now()),
+  };
+}
+
+/** Server-side message rejections, rendered in the existing conversation banner. */
+const SESSION_SEND_ERRORS: Record<string, string> = {
+  empty: "Type a message before sending.",
+  "too-long": "That message is too long to translate in one go.",
+  "invalid-language": "This session's language cannot be changed from a paired device.",
+  "invalid-payload": "That message could not be sent.",
+  "translation-failed": "The local translation engine could not translate that message.",
+  "session-ended": "This private session has ended.",
+};
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>(AppMode.WELCOME);
   const [domain, setDomain] = useState<AppDomain>(AppDomain.CLINIC);
-  const [patientData, setPatientData] = useState<PatientData | null>(null);
+  const [profile, setProfile] = useState<DomainProfile | null>(null);
   const [conversation, setConversation] = useState<Message[]>([]);
   const [intakeStep, setIntakeStep] = useState(0);
 
-  const handleIntakeComplete = (data: PatientData) => {
-    setPatientData(data);
+  /**
+   * Temporary private session (Phase 3). The id is issued once by the server and
+   * held in state, so it stays stable for the whole session - it is never
+   * generated during render. Shared-device mode needs no network session.
+   */
+  const [privateSession, setPrivateSession] = useState<SessionHandle | null>(null);
+  /** Participant language chosen for the private session (Phase 4). */
+  const [privateLanguage, setPrivateLanguage] = useState<Language>(Language.SWAHILI);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [participantConnected, setParticipantConnected] = useState(false);
+  const [participantJoin, setParticipantJoin] = useState<{ sessionId: string; token: string } | null>(null);
+  const hostSocketRef = useRef<Socket | null>(null);
+  /** The paired device is translating right now (private mode only). */
+  const [peerTranslating, setPeerTranslating] = useState(false);
+  /**
+   * Set while this device deliberately ends the session, so the server's own
+   * `session:ended` broadcast does not fight the local navigation flow.
+   */
+  const endingSessionRef = useRef(false);
+
+  /**
+   * Fields the operator typed into the intake form. They outrank uncertain AI
+   * extraction inside mergeDomainProfile().
+   */
+  const lockedFormFields = useRef<string[]>([]);
+
+  // A QR pairing link is `<origin>/join/LD-XXXXXX#token=<secret>`. The secret
+  // arrives in the URL fragment, which browsers never send in an HTTP request;
+  // it is consumed once, kept in memory only, and scrubbed from the visible
+  // address bar (and history) before the socket connects.
+  useEffect(() => {
+    const pathMatch = /\/join\/([^/?#]+)/.exec(window.location.pathname);
+    const legacyId = new URLSearchParams(window.location.search).get("join");
+    const sessionId = pathMatch ? decodeURIComponent(pathMatch[1]) : legacyId;
+    const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (!sessionId || !token) return;
+
+    setParticipantJoin({ sessionId, token });
+    setMode(AppMode.PRIVATE_PARTICIPANT);
+    // Removes `/join/<id>` and the #token fragment from the address bar.
+    window.history.replaceState(null, "", "/");
+  }, []);
+
+  useEffect(() => {
+    if (!privateSession || (mode !== AppMode.PRIVATE_HOST && mode !== AppMode.CONVERSATION)) return;
+    const socket = io({
+      path: "/socket.io",
+      auth: { sessionId: privateSession.sessionId, token: privateSession.token, role: "host" },
+    });
+    hostSocketRef.current = socket;
+
+    socket.on(
+      "session:ready",
+      (value: { localLanguage?: Language; participantConnected?: boolean; messages?: unknown[] }) => {
+        if (value.localLanguage) setPrivateLanguage(value.localLanguage);
+        setParticipantConnected(Boolean(value.participantConnected));
+        // A reconnect resumes the canonical server transcript instead of losing it.
+        const restored = (value.messages ?? [])
+          .map(asWireMessage)
+          .filter((message): message is Message => message !== null);
+        if (restored.length) setConversation(restored);
+      }
+    );
+    socket.on("participant-connected", () => setParticipantConnected(true));
+    socket.on("participant-disconnected", () => setParticipantConnected(false));
+    socket.on("message:processing", () => setPeerTranslating(true));
+    socket.on("message:translated", (value: { message?: unknown }) => {
+      setPeerTranslating(false);
+      const message = asWireMessage(value?.message);
+      if (!message) return;
+      setConversation((previous) =>
+        previous.some((item) => item.id === message.id) ? previous : [...previous, message]
+      );
+    });
+    socket.on("message:error", () => setPeerTranslating(false));
+    socket.on("session:ended", () => {
+      // Reached only when the session died elsewhere (expiry sweep, another
+      // device) - a deliberate end here sets endingSessionRef first.
+      if (endingSessionRef.current) return;
+      setPeerTranslating(false);
+      setSessionError("This private session has ended.");
+      setPrivateSession(null);
+      setParticipantConnected(false);
+      setMode(AppMode.WELCOME);
+    });
+    socket.on("connect_error", () => {
+      if (endingSessionRef.current) return;
+      setSessionError("Could not join the private session channel. Is the local server running?");
+    });
+
+    return () => {
+      socket.disconnect();
+      hostSocketRef.current = null;
+    };
+  }, [privateSession, mode]);
+
+  /**
+   * Private-mode send: raw text only. The server owns direction, translation
+   * provider, model and prompt, and returns the canonical message through the
+   * acknowledgement, so both devices render identical content.
+   */
+  const sendViaSession = (text: string, sender: "doctor" | "patient") =>
+    new Promise<Message>((resolve, reject) => {
+      const socket = hostSocketRef.current;
+      if (!socket?.connected) {
+        reject(new Error("The private session channel is not connected."));
+        return;
+      }
+      socket.timeout(60000).emit(
+        "message:send",
+        { text, sender },
+        (timeoutError: unknown, reply?: { ok?: boolean; error?: string; message?: unknown }) => {
+          if (timeoutError) {
+            reject(new Error("The local translation engine did not answer in time."));
+            return;
+          }
+          if (!reply?.ok) {
+            reject(new Error(SESSION_SEND_ERRORS[reply?.error ?? ""] ?? "The message could not be translated."));
+            return;
+          }
+          const message = asWireMessage(reply.message);
+          if (!message) {
+            reject(new Error("The server returned an unreadable message."));
+            return;
+          }
+          resolve(message);
+        }
+      );
+    });
+
+  const handleIntakeComplete = (data: PatientProfile) => {
+    setProfile(data);
+    lockedFormFields.current = Object.entries(data)
+      .filter(([, value]) =>
+        typeof value === "string" ? value.trim().length > 0 : Array.isArray(value) && value.length > 0
+      )
+      .map(([field]) => field);
     setMode(AppMode.CONVERSATION);
   };
 
+  /**
+   * Single merge point for extracted profiles: an empty extraction never erases
+   * confirmed information, and the profile is always relabelled with the active
+   * domain (see src/profile.ts).
+   */
+  const handleProfileUpdate = (incoming: unknown) => {
+    setProfile((previous) =>
+      mergeDomainProfile(domain, previous, incoming, { lockedFields: lockedFormFields.current })
+    );
+  };
+
+  /**
+   * Host "End private session": the server invalidates the token, drops the
+   * messages and profile from memory, broadcasts `session:ended` (which the
+   * paired device shows as "Session ended by host") and disconnects both
+   * sockets. `endingSessionRef` keeps that broadcast from fighting this flow.
+   */
+  const endPrivateSession = async () => {
+    if (!privateSession) return;
+    endingSessionRef.current = true;
+    await endSession(privateSession.sessionId, privateSession.token);
+    setPrivateSession(null);
+    setParticipantConnected(false);
+    setPeerTranslating(false);
+  };
+
   const handleConsultationEnd = () => {
+    // In private mode the paired session is torn down too, otherwise the client
+    // would keep waiting for a host that has already moved on.
+    if (privateSession) void endPrivateSession();
     setMode(AppMode.SUMMARY);
+  };
+
+  /** The host view already ended the session server side; clean up and return. */
+  const handlePrivateSessionClosed = () => {
+    endingSessionRef.current = true;
+    setPrivateSession(null);
+    setParticipantConnected(false);
+    setPeerTranslating(false);
+    setMode(AppMode.WELCOME);
+  };
+
+  /**
+   * Private device mode (Phase 4): creates the temporary server session through
+   * the existing POST /api/sessions and opens the host waiting room.
+   *
+   * Shared Device Mode never calls this, so an ordinary single-screen session
+   * creates no server session at all.
+   */
+  const startPrivateSession = async (language: Language) => {
+    setSessionError(null);
+    // A fresh session is not being torn down by this device.
+    endingSessionRef.current = false;
+    const handle = await createSession(domain, language);
+    if (!handle) {
+      setSessionError("Could not create a private session. Is the local server still running?");
+      return;
+    }
+
+    // A new session supersedes any previous one.
+    if (privateSession) void endSession(privateSession.sessionId, privateSession.token);
+
+    setPrivateSession(handle);
+    setPrivateLanguage(language);
+    setParticipantConnected(false);
+    setMode(AppMode.PRIVATE_HOST);
+  };
+
+  /** Participant connected: hand the host the normal conversation controls. */
+  const handleOpenHostConversation = () => {
+    setMode(AppMode.CONVERSATION);
   };
 
   const resetApp = () => {
     setMode(AppMode.WELCOME);
-    setPatientData(null);
+    setProfile(null);
     setConversation([]);
     setIntakeStep(0);
+    lockedFormFields.current = [];
+    // Ending a session invalidates its token and drops its data server side.
+    if (privateSession) {
+      endingSessionRef.current = true;
+      void endSession(privateSession.sessionId, privateSession.token);
+      setPrivateSession(null);
+    }
+    setParticipantConnected(false);
+    setPeerTranslating(false);
   };
+
+  // A profile belonging to another domain is never displayed.
+  const activeProfile = activeProfileFor(domain, profile);
 
   const getDomainStyle = () => {
     switch (domain) {
@@ -82,23 +329,27 @@ export default function App() {
 
   const style = getDomainStyle();
 
+  // Welcome and private-host screens have their own focused shell: no shared
+  // sidebar, header or footer.
+  const showAppChrome = mode !== AppMode.WELCOME && mode !== AppMode.PRIVATE_HOST && mode !== AppMode.PRIVATE_PARTICIPANT;
+
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
-      {mode !== AppMode.WELCOME && (
+      {showAppChrome && (
         <Sidebar 
           mode={mode} 
           intakeStep={intakeStep} 
           domain={domain} 
           setDomain={setDomain} 
-          patientData={patientData} 
+          profile={activeProfile} 
         />
       )}
 
       <div className="flex-grow flex flex-col overflow-hidden">
-        {mode !== AppMode.WELCOME && (
+        {showAppChrome && (
           <Header 
             mode={mode} 
-            patientData={patientData} 
+            profile={activeProfile} 
             domain={domain}
             onReset={resetApp} 
             onEndSession={handleConsultationEnd} 
@@ -229,6 +480,53 @@ export default function App() {
                   </button>
                 </div>
 
+                {/* Session mode: Shared Device (this screen) or Private Session (device each) */}
+                <div className="w-full max-w-2xl px-6 shrink-0">
+                  <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 text-left sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Session mode</p>
+                      <p className="text-xs font-medium text-slate-500">
+                        Shared Device keeps both speakers on this screen. Private Session creates a temporary
+                        LD-XXXXXX session for a second device.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => setMode(AppMode.CONVERSATION)}
+                        className="rounded-xl border border-slate-200 px-4 py-2.5 text-[11px] font-bold uppercase tracking-widest text-slate-600 transition-colors hover:border-slate-300 hover:text-slate-900"
+                      >
+                        Shared Device
+                      </button>
+                      <label className="sr-only" htmlFor="private-language">
+                        Participant language
+                      </label>
+                      <select
+                        id="private-language"
+                        value={privateLanguage}
+                        onChange={(event) => setPrivateLanguage(event.target.value as Language)}
+                        className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[11px] font-semibold text-slate-600"
+                      >
+                        {Object.values(Language)
+                          .filter((value) => value !== Language.ENGLISH)
+                          .map((value) => (
+                            <option key={value} value={value}>
+                              {value}
+                            </option>
+                          ))}
+                      </select>
+                      <button
+                        onClick={() => void startPrivateSession(privateLanguage)}
+                        className={`rounded-xl ${style.bgColor} px-4 py-2.5 text-[11px] font-bold uppercase tracking-widest text-white shadow-sm transition-opacity hover:opacity-90`}
+                      >
+                        Private Session
+                      </button>
+                    </div>
+                  </div>
+                  {sessionError && (
+                    <p className="mt-2 text-left text-xs font-semibold text-red-600">{sessionError}</p>
+                  )}
+                </div>
+
                 <footer className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em] px-4">
                   {style.footerText}
                 </footer>
@@ -256,12 +554,44 @@ export default function App() {
                 className="h-full"
               >
                 <ConversationView 
-                  patientData={patientData} 
-                  onUpdatePatientData={setPatientData}
+                  profile={activeProfile} 
+                  onUpdateProfile={handleProfileUpdate}
+                  initialLanguage={privateLanguage}
                   messages={conversation}
                   onUpdateMessages={setConversation}
+                  sendViaSession={privateSession ? sendViaSession : undefined}
+                  peerIsTranslating={peerTranslating}
                   onEndSession={handleConsultationEnd}
                   domain={domain}
+                />
+              </motion.div>
+            )}
+
+            {mode === AppMode.PRIVATE_HOST && privateSession && (
+              <motion.div
+                key="private-host"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="h-full"
+              >
+                <PrivateSessionHost
+                  session={privateSession}
+                  domain={domain}
+                  language={privateLanguage}
+                  onOpenConversation={handleOpenHostConversation}
+                  onSessionClosed={handlePrivateSessionClosed}
+                  participantConnected={participantConnected}
+                />
+              </motion.div>
+            )}
+
+            {mode === AppMode.PRIVATE_PARTICIPANT && participantJoin && (
+              <motion.div key="private-participant" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="h-full">
+                <PrivateSessionParticipant
+                  sessionId={participantJoin.sessionId}
+                  token={participantJoin.token}
+                  onClosed={() => { setParticipantJoin(null); setMode(AppMode.WELCOME); window.history.replaceState(null, "", window.location.pathname); }}
                 />
               </motion.div>
             )}
@@ -274,17 +604,26 @@ export default function App() {
                 exit={{ opacity: 0, scale: 1.02 }}
                 className="max-w-4xl mx-auto"
               >
-                <SummaryView patientData={patientData} conversation={conversation} domain={domain} />
+                <SummaryView profile={activeProfile} conversation={conversation} domain={domain} />
               </motion.div>
             )}
           </AnimatePresence>
         </main>
 
-        {mode !== AppMode.WELCOME && (
+        {showAppChrome && (
           <footer className="h-12 bg-white border-t border-slate-200 px-8 flex items-center justify-between text-[11px] text-slate-400 font-bold uppercase tracking-widest shrink-0">
-            <div>Session ID: LD-{(Math.random() * 1000).toFixed(0)}-X8</div>
+            {privateSession ? (
+              <div className="flex items-center gap-2">
+                <span>Session ID: {privateSession.sessionId}</span>
+                <span className="normal-case font-semibold text-slate-300">
+                  {privateLanguage} &#8596; English
+                </span>
+              </div>
+            ) : (
+              <span>Shared device mode</span>
+            )}
             <div className="flex gap-6">
-              <span>Cloud Ready</span>
+              <span>Local-first - no cloud AI</span>
               <span className="text-green-600 font-black">● Smart Extractors Connected</span>
             </div>
           </footer>

@@ -1,0 +1,442 @@
+[
+  {
+    "candidate": "local-mt-hf",
+    "model": "Xenova/opus-mt-en-fr",
+    "runtime": "transformers.js + ONNX Runtime, q8 (cached locally)",
+    "license": "Helsinki-NLP/opus-mt-en-fr = Apache-2.0",
+    "direction": "English -> French",
+    "warmupMs": 3250,
+    "cases": [
+      {
+        "id": "en-greeting",
+        "category": "greeting",
+        "source": "Good morning, doctor.",
+        "reference": "Bonjour, docteur.",
+        "output": "Bonjour, docteur.",
+        "latencyMs": 245,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-conversation",
+        "category": "conversation",
+        "source": "How are you feeling today?",
+        "reference": "Comment vous sentez-vous aujourd'hui ?",
+        "output": "Comment te sens-tu aujourd'hui?",
+        "latencyMs": 449,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-numbers",
+        "category": "numbers",
+        "source": "The bill is 15,000 shillings for three days.",
+        "reference": "La facture est de 15 000 shillings pour trois jours.",
+        "output": "Le projet de loi est de 15 000 shillings pendant trois jours.",
+        "latencyMs": 665,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-dates",
+        "category": "dates",
+        "source": "Your appointment is on 12 March 2026.",
+        "reference": "Votre rendez-vous est le 12 mars 2026.",
+        "output": "Votre rendez-vous est le 12 mars 2026.",
+        "latencyMs": 475,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-names",
+        "category": "names",
+        "source": "Please call Nurse Amina to room four.",
+        "reference": "Veuillez appeler l'infirmière Amina dans la chambre quatre.",
+        "output": "Appelez l'infirmière Amina dans la chambre 4.",
+        "latencyMs": 450,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-clinic",
+        "category": "clinic",
+        "source": "I have been taking this medicine for five days but the pain has not stopped.",
+        "reference": "Je prends ce médicament depuis cinq jours mais la douleur ne s'est pas arrêtée.",
+        "output": "Je prends ce médicament depuis cinq jours, mais la douleur n'a pas cessé.",
+        "latencyMs": 769,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-symptoms",
+        "category": "symptoms",
+        "source": "My chest feels heavy and I am short of breath.",
+        "reference": "J'ai la poitrine lourde et j'ai du mal à respirer.",
+        "output": "Ma poitrine est lourde et je suis à court de souffle.",
+        "latencyMs": 521,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-medication",
+        "category": "medication",
+        "source": "Take one tablet of paracetamol 500 mg twice a day after meals.",
+        "reference": "Prenez un comprimé de paracétamol 500 mg deux fois par jour après les repas.",
+        "output": "Prenez un comprimé de paracetamol 500 mg deux fois par jour après les repas.",
+        "latencyMs": 790,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-hotel",
+        "category": "hotel",
+        "source": "I would like to book a double room for two nights with breakfast included.",
+        "reference": "Je voudrais réserver une chambre double pour deux nuits avec petit-déjeuner inclus.",
+        "output": "Je voudrais réserver une chambre double pour deux nuits avec petit déjeuner inclus.",
+        "latencyMs": 625,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-office",
+        "category": "office",
+        "source": "The meeting is on Monday, please send me the report before then.",
+        "reference": "La réunion est lundi, veuillez m'envoyer le rapport avant.",
+        "output": "La séance est lundi, veuillez me faire parvenir le rapport avant.",
+        "latencyMs": 610,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-question",
+        "category": "question",
+        "source": "Do you understand what I am saying?",
+        "reference": "Comprenez-vous ce que je dis ?",
+        "output": "Vous comprenez ce que je dis?",
+        "latencyMs": 385,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-negation",
+        "category": "negation",
+        "source": "I am not allowed to eat food with salt.",
+        "reference": "Je ne suis pas autorisé à manger des aliments contenant du sel.",
+        "output": "Je ne suis pas autorisé à manger avec du sel.",
+        "latencyMs": 525,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-instruction",
+        "category": "instruction",
+        "source": "Open your mouth and breathe in deeply.",
+        "reference": "Ouvrez la bouche et respirez profondément.",
+        "output": "Ouvrez la bouche et respirez profondément.",
+        "latencyMs": 372,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "en-clinic-2",
+        "category": "clinic",
+        "source": "The doctor will see you after the nurse checks your blood pressure.",
+        "reference": "Le médecin vous verra après que l'infirmière aura pris votre tension artérielle.",
+        "output": "Le médecin vous verra après que l'infirmière ait vérifié votre tension artérielle.",
+        "latencyMs": 683,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      }
+    ]
+  },
+  {
+    "candidate": "local-mt-hf",
+    "model": "Xenova/opus-mt-fr-en",
+    "runtime": "transformers.js + ONNX Runtime, q8 (cached locally)",
+    "license": "Helsinki-NLP/opus-mt-fr-en = Apache-2.0",
+    "direction": "French -> English",
+    "warmupMs": 1728,
+    "cases": [
+      {
+        "id": "fr-greeting",
+        "category": "greeting",
+        "source": "Bonjour, docteur.",
+        "reference": "Good morning, doctor.",
+        "output": "Hello, doctor.",
+        "latencyMs": 210,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-conversation",
+        "category": "conversation",
+        "source": "Comment vous sentez-vous aujourd'hui ?",
+        "reference": "How are you feeling today?",
+        "output": "How are you feeling today?",
+        "latencyMs": 289,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-numbers",
+        "category": "numbers",
+        "source": "La facture s'élève à 15 000 shillings pour trois jours.",
+        "reference": "The bill is 15,000 shillings for three days.",
+        "output": "The bill is 15,000 shillings for three days.",
+        "latencyMs": 542,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-dates",
+        "category": "dates",
+        "source": "Votre rendez-vous est le 12 mars 2026.",
+        "reference": "Your appointment is on 12 March 2026.",
+        "output": "Your appointment is on March 12, 2026.",
+        "latencyMs": 418,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-names",
+        "category": "names",
+        "source": "Veuillez appeler l'infirmière Amina dans la chambre quatre.",
+        "reference": "Please call Nurse Amina to room four.",
+        "output": "Please call Nurse Amina in room four.",
+        "latencyMs": 426,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-clinic",
+        "category": "clinic",
+        "source": "Je prends ce médicament depuis cinq jours mais la douleur ne s'est pas arrêtée.",
+        "reference": "I have been taking this medicine for five days but the pain has not stopped.",
+        "output": "I've been taking this medication for five days, but the pain hasn't stopped.",
+        "latencyMs": 939,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-symptoms",
+        "category": "symptoms",
+        "source": "J'ai la poitrine lourde et j'ai du mal à respirer.",
+        "reference": "My chest feels heavy and I am short of breath.",
+        "output": "I have a heavy chest and I have difficulty breathing.",
+        "latencyMs": 493,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-medication",
+        "category": "medication",
+        "source": "Prenez un comprimé de paracétamol 500 mg deux fois par jour après les repas.",
+        "reference": "Take one tablet of paracetamol 500 mg twice a day after meals.",
+        "output": "Take one tablet of paracetamol 500 mg twice daily after meals.",
+        "latencyMs": 654,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-hotel",
+        "category": "hotel",
+        "source": "Je voudrais réserver une chambre double pour deux nuits avec petit-déjeuner inclus.",
+        "reference": "I would like to book a double room for two nights with breakfast included.",
+        "output": "I would like to reserve a double room for two nights with breakfast included.",
+        "latencyMs": 660,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-office",
+        "category": "office",
+        "source": "La réunion est lundi, veuillez m'envoyer le rapport avant.",
+        "reference": "The meeting is on Monday, please send me the report before then.",
+        "output": "The meeting is Monday, please send me the report before.",
+        "latencyMs": 589,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-question",
+        "category": "question",
+        "source": "Comprenez-vous ce que je dis ?",
+        "reference": "Do you understand what I am saying?",
+        "output": "Do you understand what I'm saying?",
+        "latencyMs": 417,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-negation",
+        "category": "negation",
+        "source": "Je ne suis pas autorisé à manger des aliments contenant du sel.",
+        "reference": "I am not allowed to eat food with salt.",
+        "output": "I am not allowed to eat foods containing salt.",
+        "latencyMs": 450,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-instruction",
+        "category": "instruction",
+        "source": "Ouvrez la bouche et respirez profondément.",
+        "reference": "Open your mouth and breathe in deeply.",
+        "output": "Open your mouth and breathe deeply.",
+        "latencyMs": 329,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      },
+      {
+        "id": "fr-clinic-2",
+        "category": "clinic",
+        "source": "Le médecin vous verra après que l'infirmière aura pris votre tension artérielle.",
+        "reference": "The doctor will see you after the nurse checks your blood pressure.",
+        "output": "The doctor will see you after the nurse takes your blood pressure.",
+        "latencyMs": 644,
+        "flags": {
+          "empty": false,
+          "repetition": false,
+          "sourceCopy": false
+        },
+        "missingPreserve": [],
+        "error": null
+      }
+    ]
+  }
+]

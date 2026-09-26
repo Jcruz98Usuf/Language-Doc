@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { ArrowRight, ClipboardList, CheckCircle2 } from "lucide-react";
-import { PatientData } from "../types";
+import { AppDomain, PatientProfile } from "../types";
 
 interface IntakeFormProps {
-  onComplete: (data: PatientData) => void;
+  onComplete: (data: PatientProfile) => void;
   onStepChange?: (step: number) => void;
 }
 
@@ -15,7 +15,11 @@ const STEPS = [
 
 export default function IntakeForm({ onComplete, onStepChange }: IntakeFormProps) {
   const [step, setStep] = useState(0);
-  const [formData, setFormData] = useState<PatientData>({
+  const [formData, setFormData] = useState<PatientProfile>({
+    // NOTE (Phase 2): this wizard is still clinic-only and therefore submits a
+    // PatientProfile. Hotel/office structured intake would need its own steps;
+    // the conversation extractor fills those profiles instead.
+    domain: AppDomain.CLINIC,
     name: "",
     age: "",
     gender: "",

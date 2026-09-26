@@ -1,10 +1,17 @@
 import { useState, useRef, useEffect } from "react";
 import { Send, Languages, Mic, MicOff, Volume2, Sparkles, Activity, AlertCircle, RefreshCw } from "lucide-react";
-import { PatientData, Message, Language, AppDomain } from "../types";
-import { translateText, parseDialogue } from "../services/api";
+import { DomainProfile, Message, Language, AppDomain } from "../types";
+import { translateText, parseDialogue, fetchCapabilities, transcribeAudio, type LanguageCapability } from "../services/api";
+import {
+  LocalAudioRecorder,
+  captureFailureReason,
+  type RecordedClip,
+} from "../services/audioCapture";
+import { createPlaceholderProfile, isProfileEmpty as profileIsEmpty } from "../profile";
 
 const LOCAL_LANGUAGES = [
   { value: Language.SWAHILI, label: "Kiswahili (Swahili)", code: "sw-TZ", ttsCode: "sw-KE" },
+  { value: Language.FRENCH, label: "Français (French)", code: "fr-FR", ttsCode: "fr-FR" },
   { value: Language.LUGANDA, label: "Luganda (Uganda)", code: "lg-UG", ttsCode: "en-US" },
   { value: Language.KINYARWANDA, label: "Kinyarwanda (Rwanda)", code: "rw-RW", ttsCode: "rw-RW" },
   { value: Language.SOMALI, label: "Af-Soomaali (Somali)", code: "so-SO", ttsCode: "so-SO" },
@@ -14,26 +21,76 @@ const LOCAL_LANGUAGES = [
 ];
 
 interface ConversationViewProps {
-  patientData: PatientData | null;
-  onUpdatePatientData: (data: PatientData) => void;
+  profile: DomainProfile | null;
+  onUpdateProfile: (incoming: DomainProfile) => void;
+  /**
+   * Phase 4: private sessions pick the participant language before the
+   * conversation opens, so the host passes it in. Shared device mode omits the
+   * prop and keeps the original Swahili default.
+   */
+  initialLanguage?: Language;
   messages: Message[];
   onUpdateMessages: (messages: Message[]) => void;
+  /**
+   * Private mode (Phase 5): when provided, the paired session owns translation.
+   * This device sends raw text and renders the canonical message the server
+   * returns, so both devices show identical content and no translation provider,
+   * model or prompt is ever chosen by a browser. Shared-device mode omits the
+   * prop and keeps the original local translation path untouched.
+   */
+  sendViaSession?: (text: string, sender: "doctor" | "patient") => Promise<Message>;
+  /** The paired device is translating right now (private mode only). */
+  peerIsTranslating?: boolean;
   onEndSession: () => void;
   domain: AppDomain;
 }
 
 export default function ConversationView({
-  patientData,
-  onUpdatePatientData,
+  profile,
+  onUpdateProfile,
+  initialLanguage,
   messages,
   onUpdateMessages,
+  sendViaSession,
+  peerIsTranslating = false,
   onEndSession,
   domain,
 }: ConversationViewProps) {
-  const [selectedLocalLanguage, setSelectedLocalLanguage] = useState<Language>(Language.SWAHILI);
+  const [selectedLocalLanguage, setSelectedLocalLanguage] = useState<Language>(initialLanguage ?? Language.SWAHILI);
   const [inputText, setInputText] = useState("");
   const [isTranslating, setIsTranslating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Demo capability states come from the backend language registry
+  // (CORE / DEMO READY / EXPERIMENTAL). If the probe fails, no badge is shown
+  // and the conversation keeps working exactly as before.
+  const [languageCapabilities, setLanguageCapabilities] = useState<LanguageCapability[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const capabilities = await fetchCapabilities();
+      if (capabilities && !cancelled) setLanguageCapabilities(capabilities.languages);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const capabilityFor = (language: string) =>
+    languageCapabilities.find((entry) => entry.language.toLowerCase() === language.toLowerCase());
+
+  const selectedCapability = capabilityFor(String(selectedLocalLanguage));
+  const capabilityLabel = selectedCapability
+    ? selectedCapability.state !== "supported"
+      ? selectedCapability.state === "experimental"
+        ? "EXPERIMENTAL"
+        : "UNAVAILABLE"
+      : selectedCapability.role === "pivot"
+        ? "CORE"
+        : "DEMO READY"
+    : null;
+  const capabilityIsValidated = selectedCapability?.state === "supported";
   const [currentUser, setCurrentUser] = useState<"doctor" | "patient">("doctor");
   const scrollRefEn = useRef<HTMLDivElement>(null);
   const scrollRefSw = useRef<HTMLDivElement>(null);
@@ -44,13 +101,11 @@ export default function ConversationView({
   const [interimTranscript, setInterimTranscript] = useState("");
   const [currentlySpeakingId, setCurrentlySpeakingId] = useState<string | null>(null);
   const [isAutoTtsEnabled, setIsAutoTtsEnabled] = useState(true);
+  /** True while recorded audio is being transcribed locally. */
+  const [isTranscribing, setIsTranscribing] = useState(false);
 
-  const recognitionRef = useRef<any>(null);
+  const recorderRef = useRef<LocalAudioRecorder | null>(null);
   const currentListeningUserRef = useRef<"doctor" | "patient" | null>(null);
-
-  const isRecognitionActiveRef = useRef(false);
-  const pendingStartUserRef = useRef<"doctor" | "patient" | null>(null);
-  const ignoreNextSubmitRef = useRef<boolean>(false);
 
   // Latest Ref Pattern bindings to completely avoid event handler staleness
   const messagesRef = useRef(messages);
@@ -75,108 +130,16 @@ export default function ConversationView({
     if (scrollRefSw.current) scrollRefSw.current.scrollTop = scrollRefSw.current.scrollHeight;
   }, [messages, isListeningEn, isListeningSw, interimTranscript]);
 
-  // Handle Speech Recognition Setup
-  useEffect(() => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const rec = new SpeechRecognition();
-      rec.continuous = true; // KEEP MIC ALIVE so user can speak multiple sentences without getting cut off!
-      rec.interimResults = true; // Provides dynamic visual in-progress words
-
-      rec.onstart = () => {
-        isRecognitionActiveRef.current = true;
-        setInterimTranscript("");
-      };
-
-      rec.onresult = (event: any) => {
-        let finalTranscript = "";
-        let interimTranscriptText = "";
-
-        for (let i = 0; i < event.results.length; ++i) {
-          const transcript = event.results[i][0].transcript;
-          if (event.results[i].isFinal) {
-            finalTranscript += transcript;
-          } else {
-            interimTranscriptText += transcript;
-          }
-        }
-
-        setInputText(finalTranscript);
-        setInterimTranscript(interimTranscriptText);
-      };
-
-      rec.onerror = (event: any) => {
-        const errType = event.error;
-        console.warn("Speech Recognition Error:", errType);
-        
-        if (errType === "not-allowed" || errType === "service-not-allowed") {
-          setError("Microphone permission blocked. Click the top-right 'Open in New Tab' button to permit mic access outside of the secure iframe preview!");
-        } else if (errType === "network") {
-          setError("Speach connection error: Chrome blocks Web Speech inside nested frames. Click the top-right 'Open in New Tab' button to run correctly.");
-        } else if (errType === "no-speech") {
-          // Ignore no-speech error gracefully as it's common when waiting
-          console.log("Speech Recognition: No speech detected.");
-        } else if (errType === "aborted") {
-          console.log("Speech recognition stopped.");
-        } else {
-          setError(`Speech capture check: ${errType}. Try opening the app in a new browser tab.`);
-        }
-        
-        isRecognitionActiveRef.current = false;
-        setIsListeningEn(false);
-        setIsListeningSw(false);
-        setInterimTranscript("");
-      };
-
-      rec.onend = () => {
-        isRecognitionActiveRef.current = false;
-        setIsListeningEn(false);
-        setIsListeningSw(false);
-        setInterimTranscript("");
-
-        const shouldIgnore = ignoreNextSubmitRef.current;
-        ignoreNextSubmitRef.current = false;
-
-        if (!shouldIgnore) {
-          setInputText((latestText) => {
-            const trimmed = latestText.trim();
-            if (trimmed) {
-              const sender = currentListeningUserRef.current;
-              if (sender) {
-                // Auto-translate on stop/complete
-                setTimeout(() => {
-                  translateAndSendMessageRef.current?.(trimmed, sender);
-                }, 100);
-                return ""; // clear it because we are sending it
-              }
-            }
-            return latestText; // preserve manually or interim text if no submit
-          });
-        }
-
-        // Safe delayed startup recovery
-        if (pendingStartUserRef.current) {
-          const nextUser = pendingStartUserRef.current;
-          pendingStartUserRef.current = null;
-          setTimeout(() => {
-            startListening(nextUser);
-          }, 60);
-        }
-      };
-
-      recognitionRef.current = rec;
-    }
-
-    return () => {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.abort();
-        } catch (e) {
-          console.error("Cleanup error on speech recognition:", e);
-        }
-      }
-    };
-  }, []);
+  /**
+   * Voice input on THIS device is LOCAL (Phase 7A).
+   *
+   * The browser SpeechRecognition API was removed from this component: on
+   * Chrome it streams audio to a remote recognition service, which contradicts
+   * the local-first guarantee the rest of the app is built on. Instead,
+   * LocalAudioRecorder captures raw PCM with the Web Audio API and posts it to
+   * /api/transcribe, which runs a Whisper model on this machine. See
+   * startListening() below for the push-to-talk flow.
+   */
 
   // Voice output (TTS) with native engine
   const speakText = (text: string, lang: Language, messageId: string) => {
@@ -213,9 +176,20 @@ export default function ConversationView({
     window.speechSynthesis.speak(utterance);
   };
 
-  const startListening = (user: "doctor" | "patient") => {
-    if (!recognitionRef.current) {
-      setError("Speech recognition is not fully supported in this frame. Open the preview in a new tab.");
+  /**
+   * Push-to-talk with the LOCAL engine (Phase 7A).
+   *
+   * Press the mic: recording starts and raw PCM is buffered in memory only.
+   * Press again: recording stops, the clip goes to /api/transcribe (local
+   * Whisper), and the transcript is fed into the existing translation flow
+   * exactly as typed text is.
+   */
+  const startListening = async (user: "doctor" | "patient") => {
+    if (isTranscribing) return;
+
+    const blocked = captureFailureReason();
+    if (blocked) {
+      setError(blocked);
       return;
     }
 
@@ -228,57 +202,110 @@ export default function ConversationView({
     setCurrentUser(user);
     setInputText("");
     setInterimTranscript("");
+    setError(null);
 
-    // Schedule deferred startup if already active to prevent overlap errors
-    if (isRecognitionActiveRef.current) {
-      pendingStartUserRef.current = user;
-      ignoreNextSubmitRef.current = true;
-      try {
-        recognitionRef.current.abort();
-      } catch (e) {
-        console.error("Failed to abort speech recognition:", e);
-      }
-      return;
-    }
-
-    if (user === "doctor") {
-      recognitionRef.current.lang = "en-US";
-      setIsListeningEn(true);
-      setIsListeningSw(false);
-    } else {
-      const config = LOCAL_LANGUAGES.find(l => l.value === selectedLocalLanguage);
-      recognitionRef.current.lang = config ? config.code : "sw-TZ";
-      setIsListeningSw(true);
-      setIsListeningEn(false);
-    }
+    if (!recorderRef.current) recorderRef.current = new LocalAudioRecorder();
 
     try {
-      recognitionRef.current.start();
-    } catch (e: any) {
-      console.error("Failed to start speech recognition:", e);
-      if (e?.message && e.message.includes("already started")) {
-        pendingStartUserRef.current = user;
-        ignoreNextSubmitRef.current = true;
-        try {
-          recognitionRef.current.abort();
-        } catch (abortErr) {
-          console.error("Emergency abort failed:", abortErr);
-        }
+      await recorderRef.current.start();
+      if (user === "doctor") {
+        setIsListeningEn(true);
+        setIsListeningSw(false);
+      } else {
+        setIsListeningSw(true);
+        setIsListeningEn(false);
       }
+    } catch (err) {
+      recorderRef.current?.cancel();
+      setIsListeningEn(false);
+      setIsListeningSw(false);
+      setError(
+        err instanceof Error
+          ? `Microphone unavailable: ${err.message}`
+          : "Microphone unavailable. Please type the message - it is translated the same way."
+      );
     }
   };
 
-  const stopListening = () => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        console.error("Failed to stop speech recognition:", e);
-      }
-    }
+  const stopListening = async () => {
+    const recorder = recorderRef.current;
+    const sender = currentListeningUserRef.current;
+
     setIsListeningEn(false);
     setIsListeningSw(false);
     setInterimTranscript("");
+
+    if (!recorder || !recorder.isRecording) return;
+
+    let clip: RecordedClip;
+    try {
+      clip = await recorder.stop();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Recording failed. Please try again or type the message."
+      );
+      return;
+    }
+
+    // The mic is already released; audio is now in memory only.
+    const language = sender === "patient" ? String(selectedLocalLanguage) : "English";
+    setIsTranscribing(true);
+    setInterimTranscript("Transcribing locally...");
+
+    try {
+      const text = await transcribeAudio(clip, language, domain);
+      setInterimTranscript("");
+      setInputText(text);
+      if (sender && text.trim()) {
+        await translateAndSendMessageRef.current?.(text, sender);
+        setInputText("");
+      }
+    } catch (err) {
+      setInterimTranscript("");
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Local transcription failed. Please type the message - it is translated the same way."
+      );
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  /**
+   * Profile extraction is debounced and never awaited by the translation path:
+   * translation stays the highest-priority interactive operation. Only the
+   * latest transcript is extracted (older pending requests are dropped), and
+   * the server additionally deduplicates identical transcripts and aborts
+   * superseded extraction work, so no message is lost and confirmed profile
+   * data is preserved by the server-side merge.
+   */
+  const EXTRACT_DEBOUNCE_MS = 3500;
+  const extractionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestExtractionRef = useRef<{ messages: Message[]; domain: string } | null>(null);
+
+  const runProfileExtraction = async (msgs: Message[], dom: string) => {
+    try {
+      const parsed = await parseDialogue(msgs, dom);
+      // The server validated and shaped the profile (Phase 2); the merge that
+      // protects confirmed values happens in App.handleProfileUpdate().
+      if (parsed && typeof parsed === "object") {
+        onUpdateProfile(parsed);
+      }
+    } catch (parseErr) {
+      console.error("Dialogue extraction parse failed:", parseErr);
+    }
+  };
+
+  const scheduleProfileExtraction = (msgs: Message[], dom: string) => {
+    latestExtractionRef.current = { messages: msgs, domain: dom };
+    if (extractionTimerRef.current) clearTimeout(extractionTimerRef.current);
+    extractionTimerRef.current = setTimeout(() => {
+      const pending = latestExtractionRef.current;
+      extractionTimerRef.current = null;
+      latestExtractionRef.current = null;
+      if (pending) void runProfileExtraction(pending.messages, pending.domain);
+    }, EXTRACT_DEBOUNCE_MS);
   };
 
   const translateAndSendMessage = async (textToSend: string, sender: "doctor" | "patient") => {
@@ -290,23 +317,26 @@ export default function ConversationView({
     
     setIsTranslating(true);
     try {
-      const translation = await translateText(
-        textToSend,
-        sourceLang,
-        targetLang,
-        `Communication from ${sender} in domain context ${domain}.`,
-        domain
-      );
+      // Private mode: the paired session owns translation, so this device sends
+      // raw text and renders whatever canonical message the server returns.
+      const newMessage: Message = sendViaSession
+        ? await sendViaSession(textToSend, sender)
+        : {
+            id: crypto.randomUUID(),
+            text: textToSend,
+            sender: sender,
+            originalText: textToSend,
+            translation: await translateText(
+              textToSend,
+              sourceLang,
+              targetLang,
+              `Communication from ${sender} in domain context ${domain}.`,
+              domain
+            ),
+            timestamp: new Date(),
+          };
 
-      const newMessage: Message = {
-        id: crypto.randomUUID(),
-        text: textToSend,
-        sender: sender,
-        originalText: textToSend,
-        translation: translation,
-        timestamp: new Date(),
-      };
-
+      const translation = newMessage.translation;
       const revisedMessages = [...messages, newMessage];
       onUpdateMessages(revisedMessages);
 
@@ -319,15 +349,9 @@ export default function ConversationView({
         }
       }
 
-      // Background Dialogue Extractors synchronizer: Extract card details on-the-fly!
-      try {
-        const parsed = await parseDialogue(revisedMessages, domain);
-        if (parsed && typeof parsed === "object") {
-          onUpdatePatientData(parsed);
-        }
-      } catch (parseErr) {
-        console.error("Dialogue extraction parse failed:", parseErr);
-      }
+      // Background profile extraction: debounced, never blocks translation,
+      // and only the latest transcript is sent (see scheduleProfileExtraction).
+      scheduleProfileExtraction(revisedMessages, domain);
 
     } catch (err) {
       console.error(err);
@@ -348,8 +372,8 @@ export default function ConversationView({
     
     // Stop recording if active and ignore subsequent end trigger to prevent double send
     if (isListeningEn || isListeningSw) {
-      ignoreNextSubmitRef.current = true;
-      stopListening();
+      // Cancel the in-flight recording: the typed text is what gets sent.
+      recorderRef.current?.cancel();
     }
 
     setInputText("");
@@ -560,18 +584,13 @@ export default function ConversationView({
     window.speechSynthesis.speak(utterance);
   };
 
-  // Skip wizard back-door trigger
+  // Skip wizard back-door trigger: starts the session with a placeholder profile
+  // for the ACTIVE domain (Phase 2 - no medical fields for hotel/office).
   const skipWizardIntake = () => {
-    onUpdatePatientData({
-      name: "Active Session Visitor",
-      age: "Not specified",
-      gender: "Not specified",
-      complaint: "Consultation initiated directly",
-      symptoms: [],
-    });
+    onUpdateProfile(createPlaceholderProfile(domain));
   };
 
-  const isProfileEmpty = !patientData || (!patientData.name && !patientData.guestName && !patientData.employeeName);
+  const isProfileEmpty = profileIsEmpty(profile);
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -580,6 +599,21 @@ export default function ConversationView({
         <div className="flex items-center gap-2 flex-wrap">
           <Languages className="h-4 w-4 text-slate-600 animate-pulse" />
           <span className="tracking-wider text-[11px] uppercase font-bold text-slate-600">DualBridge AI Active • {labels.title}</span>
+          {peerIsTranslating && (
+            <span className="flex items-center gap-1.5 rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-amber-700">
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500" />
+              Paired device translating
+            </span>
+          )}
+          {isTranscribing && (
+            <span
+              className="flex items-center gap-1.5 rounded-full bg-slate-900 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-white"
+              title="Running the local speech-to-text engine on this machine"
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              Transcribing locally
+            </span>
+          )}
           <a
             href={window.location.href}
             target="_blank"
@@ -762,12 +796,13 @@ export default function ConversationView({
               <button
                 type="button"
                 onClick={() => isListeningEn ? stopListening() : startListening("doctor")}
+                disabled={isTranscribing}
                 className={`p-2.5 rounded-lg shadow-sm transition-all flex items-center justify-center border ${
                   isListeningEn 
                     ? "bg-red-500 border-red-400 text-white animate-pulse hover:bg-red-600" 
                     : "bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border-slate-200"
                 }`}
-                title={isListeningEn ? "Stop feedback" : "Record English Speech"}
+                title={isTranscribing ? "Transcribing locally..." : isListeningEn ? "Stop, transcribe and translate" : "Record English speech (local engine, offline)"}
               >
                 {isListeningEn ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </button>
@@ -785,7 +820,7 @@ export default function ConversationView({
         {/* Patient/Guest Interface (Dynamic Local Language) */}
         <section className="bg-slate-50 flex flex-col p-8 overflow-hidden border-l border-slate-200">
           <div className="flex flex-wrap gap-2 items-center justify-between mb-4 shrink-0">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-xs font-black text-slate-500 uppercase tracking-widest">
                 {labels.clientTitlePrefix}
               </h2>
@@ -799,12 +834,44 @@ export default function ConversationView({
                 }}
                 className="bg-white border border-slate-200 text-xs font-bold text-slate-700 px-2 py-1 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500/30 cursor-pointer shadow-xs"
               >
-                {LOCAL_LANGUAGES.map((l) => (
-                  <option key={l.value} value={l.value}>
-                    {l.label}
-                  </option>
-                ))}
+                {LOCAL_LANGUAGES.map((l) => {
+                  const entry = capabilityFor(String(l.value));
+                  const suffix = entry
+                    ? entry.state === "supported"
+                      ? entry.role === "pivot"
+                        ? " · core"
+                        : " · demo ready"
+                      : entry.state === "experimental"
+                        ? " · experimental"
+                        : " · unavailable"
+                    : "";
+                  return (
+                    <option key={l.value} value={l.value}>
+                      {l.label}
+                      {suffix}
+                    </option>
+                  );
+                })}
               </select>
+              {capabilityLabel && (
+                <span
+                  title={selectedCapability?.detail ?? ""}
+                  className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                    capabilityIsValidated
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-amber-50 text-amber-700 border-amber-200"
+                  }`}
+                >
+                  {capabilityLabel}
+                </span>
+              )}
+              {selectedCapability && !capabilityIsValidated && (
+                <p className="w-full text-[10px] font-semibold text-amber-600">
+                  Development notice: no dedicated local translation model for{" "}
+                  {selectedCapability.language}. The general chat model answers and its output is{" "}
+                  <span className="font-black">not validated</span> for this language.
+                </p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               {isListeningSw && (
@@ -900,12 +967,13 @@ export default function ConversationView({
               <button
                 type="button"
                 onClick={() => isListeningSw ? stopListening() : startListening("patient")}
+                disabled={isTranscribing}
                 className={`p-2.5 rounded-lg shadow-sm transition-all flex items-center justify-center border ${
                   isListeningSw 
                     ? "bg-red-500 border-red-400 text-white animate-pulse hover:bg-red-600" 
                     : "bg-white text-slate-600 hover:text-slate-900 hover:bg-slate-50 border-slate-200"
                 }`}
-                title={isListeningSw ? "Stop" : statusLabels.btnTitle}
+                title={isTranscribing ? "Transcribing locally..." : isListeningSw ? "Stop, transcribe and translate" : statusLabels.btnTitle}
               >
                 {isListeningSw ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
               </button>

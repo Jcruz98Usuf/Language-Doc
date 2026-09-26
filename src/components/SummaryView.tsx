@@ -1,15 +1,15 @@
 import { useState, useEffect } from "react";
 import { Copy, FileText, Check, Download, AlertCircle } from "lucide-react";
-import { PatientData, Message, AppDomain } from "../types";
+import { DomainProfile, Message, AppDomain } from "../types";
 import { generateSummary } from "../services/api";
 
 interface SummaryViewProps {
-  patientData: PatientData | null;
+  profile: DomainProfile | null;
   conversation: Message[];
   domain: AppDomain;
 }
 
-export default function SummaryView({ patientData, conversation, domain }: SummaryViewProps) {
+export default function SummaryView({ profile, conversation, domain }: SummaryViewProps) {
   const [summary, setSummary] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -17,7 +17,9 @@ export default function SummaryView({ patientData, conversation, domain }: Summa
   useEffect(() => {
     async function loadSummary() {
       try {
-        const text = await generateSummary(patientData, conversation, domain);
+        // The domain profile (Phase 2) is sent as "profile"; the server also
+        // accepts the legacy "patientData" key.
+        const text = await generateSummary(profile, conversation, domain);
         setSummary(text);
       } catch (err) {
         console.error(err);
@@ -26,7 +28,7 @@ export default function SummaryView({ patientData, conversation, domain }: Summa
       }
     }
     loadSummary();
-  }, [patientData, conversation, domain]);
+  }, [profile, conversation, domain]);
 
   const handleCopy = () => {
     if (summary) {

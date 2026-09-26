@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AppMode, PatientData, AppDomain } from "../types";
+import { AppMode, DomainProfile, AppDomain } from "../types";
 import { Stethoscope, Hotel, Briefcase, Activity, CheckCircle2 } from "lucide-react";
 
 interface SidebarProps {
@@ -11,10 +11,10 @@ interface SidebarProps {
   intakeStep?: number;
   domain: AppDomain;
   setDomain: (domain: AppDomain) => void;
-  patientData: PatientData | null;
+  profile: DomainProfile | null;
 }
 
-export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, patientData }: SidebarProps) {
+export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, profile }: SidebarProps) {
   const getDomainIcon = (d: AppDomain) => {
     switch (d) {
       case AppDomain.HOTEL:
@@ -65,6 +65,12 @@ export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, patie
   };
 
   const theme = currentTheme();
+
+  // Phase 2: DomainProfile is a discriminated union, so each domain block below
+  // only reads fields that actually belong to that domain.
+  const patient = profile?.domain === AppDomain.CLINIC ? profile : null;
+  const guest = profile?.domain === AppDomain.HOTEL ? profile : null;
+  const office = profile?.domain === AppDomain.OFFICE ? profile : null;
 
   return (
     <aside className="w-72 flex-shrink-0 bg-white border-r border-slate-200 flex flex-col justify-between py-6 px-4 hidden md:flex h-screen overflow-y-auto">
@@ -162,27 +168,27 @@ export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, patie
                 <>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Name:</span>
-                    <span className={`font-semibold ${patientData?.name ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.name || "Pending..."}
+                    <span className={`font-semibold ${patient?.name ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {patient?.name || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Age:</span>
-                    <span className={`font-semibold ${patientData?.age ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.age || "Pending..."}
+                    <span className={`font-semibold ${patient?.age ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {patient?.age || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Gender:</span>
-                    <span className={`font-semibold uppercase tracking-wider ${patientData?.gender ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.gender || "Pending..."}
+                    <span className={`font-semibold uppercase tracking-wider ${patient?.gender ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {patient?.gender || "Pending..."}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-slate-400">Symptoms:</span>
                     <div className="flex flex-wrap gap-1 mt-1">
-                      {patientData?.symptoms && patientData.symptoms.length > 0 ? (
-                        patientData.symptoms.map((s, idx) => (
+                      {patient && patient.symptoms.length > 0 ? (
+                        patient.symptoms.map((s, idx) => (
                           <span key={idx} className="bg-blue-50 text-blue-700 text-[10px] px-1.5 py-0.5 rounded-md font-semibold font-mono">
                             {s}
                           </span>
@@ -199,32 +205,32 @@ export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, patie
                 <>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Guest:</span>
-                    <span className={`font-semibold ${patientData?.guestName || patientData?.name ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.guestName || patientData?.name || "Pending..."}
+                    <span className={`font-semibold ${guest?.guestName ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {guest?.guestName || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Nights:</span>
-                    <span className={`font-semibold ${patientData?.duration || patientData?.age ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.duration || patientData?.age || "Pending..."}
+                    <span className={`font-semibold ${guest?.duration ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {guest?.duration || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Room Pref:</span>
-                    <span className={`font-semibold ${patientData?.roomPreference ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.roomPreference || "Pending..."}
+                    <span className={`font-semibold ${guest?.roomPreference ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {guest?.roomPreference || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Tier:</span>
-                    <span className={`font-semibold uppercase tracking-wider ${patientData?.budgetCategory ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.budgetCategory || "Pending..."}
+                    <span className={`font-semibold uppercase tracking-wider ${guest?.budgetCategory ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {guest?.budgetCategory || "Pending..."}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-slate-400">Diet/Special requests:</span>
-                    <span className={`font-semibold ${patientData?.specialRequests || patientData?.complaint ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.specialRequests || patientData?.complaint || "None"}
+                    <span className={`font-semibold ${guest?.specialRequests ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {guest?.specialRequests || "None"}
                     </span>
                   </div>
                 </>
@@ -234,27 +240,27 @@ export default function Sidebar({ mode, intakeStep = 0, domain, setDomain, patie
                 <>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Presenter:</span>
-                    <span className={`font-semibold ${patientData?.employeeName || patientData?.name ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.employeeName || patientData?.name || "Pending..."}
+                    <span className={`font-semibold ${office?.employeeName ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {office?.employeeName || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Team/Dept:</span>
-                    <span className={`font-semibold ${patientData?.department || patientData?.age ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.department || patientData?.age || "Pending..."}
+                    <span className={`font-semibold ${office?.department ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {office?.department || "Pending..."}
                     </span>
                   </div>
                   <div className="flex justify-between border-b border-dashed border-slate-200 pb-1.5">
                     <span className="text-slate-400">Topic:</span>
-                    <span className={`font-semibold truncate max-w-[130px] ${patientData?.meetingSubject || patientData?.complaint ? "text-slate-800" : "text-slate-300 italic"}`}>
-                      {patientData?.meetingSubject || patientData?.complaint || "Pending..."}
+                    <span className={`font-semibold truncate max-w-[130px] ${office?.meetingSubject ? "text-slate-800" : "text-slate-300 italic"}`}>
+                      {office?.meetingSubject || "Pending..."}
                     </span>
                   </div>
                   <div className="flex flex-col gap-1">
                     <span className="text-slate-400">Action Items:</span>
                     <div className="flex flex-col gap-1 mt-1.5">
-                      {patientData?.actionItems && patientData.actionItems.length > 0 ? (
-                        patientData.actionItems.map((act, idx) => (
+                      {office && office.actionItems.length > 0 ? (
+                        office.actionItems.map((act, idx) => (
                           <div key={idx} className="flex items-start gap-1 text-[10px] text-violet-700 bg-violet-50 p-1 rounded-md font-medium">
                             <span className="font-bold shrink-0">•</span>
                             <span>{act}</span>
