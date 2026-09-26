@@ -18,9 +18,15 @@
 
 import { useEffect, useRef, useState } from "react";
 import { io, type Socket } from "socket.io-client";
-import { Mic, MicOff, Send, ShieldCheck, Volume2, Wifi } from "lucide-react";
+import { Loader2, Mic, MicOff, Send, ShieldCheck, Volume2, Wifi } from "lucide-react";
 import { AppDomain, Language, Message } from "../types";
 import { fetchCapabilities } from "../services/api";
+import {
+  LocalSpeechError,
+  playLocalSpeech,
+  releasePlaybackCache,
+  stopLocalPlayback,
+} from "../services/speechPlayback";
 
 interface Props {
   sessionId: string;
@@ -81,7 +87,12 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
   const [capabilityLabel, setCapabilityLabel] = useState<string | null>(null);
   const [listening, setListening] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  /** True while the host's local voice engine is still producing the clip. */
+  const [speechLoading, setSpeechLoading] = useState(false);
   const recognitionRef = useRef<any>(null);
+
+  /** Leaving this page releases the clips cached in this browser. */
+  useEffect(() => () => releasePlaybackCache(), []);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -242,32 +253,40 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
     }
   };
 
-  /** Replay a translated line with the browser voice, when one is available. */
-  const speak = (text: string, id: string) => {
-    if (!window.speechSynthesis) {
-      setError("Playback is not available in this browser.");
-      return;
-    }
+  /**
+   * Replay a translated line with the LOCAL voice engine (Phase 7B).
+   *
+   * The clip is produced on the host laptop and returned as audio; this device
+   * only plays it. The browser's own speech synthesis is deliberately not used:
+   * on several platforms it is a remote service, and this line is a translation
+   * of a private conversation. When playback is unavailable the session stays
+   * connected and typed messages keep working.
+   */
+  const speak = async (text: string, id: string) => {
     if (speakingId === id) {
-      window.speechSynthesis.cancel();
+      stopLocalPlayback();
       setSpeakingId(null);
+      setSpeechLoading(false);
       return;
     }
 
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = speechCode;
-    const voice = window.speechSynthesis
-      .getVoices()
-      .find((candidate) => candidate.lang.startsWith(speechCode.split("-")[0]));
-    if (voice) utterance.voice = voice;
-    utterance.onend = () => setSpeakingId(null);
-    utterance.onerror = () => {
-      setSpeakingId(null);
-      setError("Playback failed. Typed messages still work.");
-    };
+    stopLocalPlayback();
+    setError(null);
     setSpeakingId(id);
-    window.speechSynthesis.speak(utterance);
+    setSpeechLoading(true);
+
+    try {
+      await playLocalSpeech(text, language);
+    } catch (playbackError) {
+      setError(
+        playbackError instanceof LocalSpeechError && playbackError.inputProblem
+          ? playbackError.message
+          : "Local voice playback unavailable."
+      );
+    } finally {
+      setSpeakingId(null);
+      setSpeechLoading(false);
+    }
   };
 
   /**
@@ -364,12 +383,21 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
                   {!isMine && (
                     <button
                       onClick={() => speak(shown, message.id)}
-                      title="Replay translation"
+                      disabled={speechLoading && speakingId === message.id}
+                      title={
+                        speechLoading && speakingId === message.id
+                          ? "Producing the clip with the host's local voice engine..."
+                          : "Replay this line with the host's local voice engine"
+                      }
                       className={`shrink-0 rounded-full p-1.5 ${
                         speakingId === message.id ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-500"
                       }`}
                     >
-                      <Volume2 className="h-3.5 w-3.5" />
+                      {speechLoading && speakingId === message.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Volume2 className="h-3.5 w-3.5" />
+                      )}
                     </button>
                   )}
                   <p

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Languages, Mic, MicOff, Volume2, Sparkles, Activity, AlertCircle, RefreshCw } from "lucide-react";
+import { Send, Languages, Mic, MicOff, Volume2, Sparkles, Activity, AlertCircle, RefreshCw, Loader2 } from "lucide-react";
 import { DomainProfile, Message, Language, AppDomain } from "../types";
 import { translateText, parseDialogue, fetchCapabilities, transcribeAudio, type LanguageCapability } from "../services/api";
 import {
@@ -7,6 +7,15 @@ import {
   captureFailureReason,
   type RecordedClip,
 } from "../services/audioCapture";
+import {
+  LocalSpeechError,
+  MAX_LOCAL_SPEECH_CHARS,
+  canPlayLocally,
+  localSpeechLanguage,
+  playLocalSpeech,
+  releasePlaybackCache,
+  stopLocalPlayback,
+} from "../services/speechPlayback";
 import { createPlaceholderProfile, isProfileEmpty as profileIsEmpty } from "../profile";
 
 const LOCAL_LANGUAGES = [
@@ -100,12 +109,22 @@ export default function ConversationView({
   const [isListeningSw, setIsListeningSw] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState("");
   const [currentlySpeakingId, setCurrentlySpeakingId] = useState<string | null>(null);
+  /** True while the local engine is still producing the clip (no audio yet). */
+  const [isSpeechLoading, setIsSpeechLoading] = useState(false);
   const [isAutoTtsEnabled, setIsAutoTtsEnabled] = useState(true);
   /** True while recorded audio is being transcribed locally. */
   const [isTranscribing, setIsTranscribing] = useState(false);
 
   const recorderRef = useRef<LocalAudioRecorder | null>(null);
   const currentListeningUserRef = useRef<"doctor" | "patient" | null>(null);
+
+  /**
+   * Voice-playback bookkeeping. Each request takes a sequence number and its own
+   * abort controller, so a line that has been superseded cannot clear the state
+   * of the line that replaced it.
+   */
+  const speechRequestRef = useRef(0);
+  const speechAbortRef = useRef<AbortController | null>(null);
 
   // Latest Ref Pattern bindings to completely avoid event handler staleness
   const messagesRef = useRef(messages);
@@ -141,40 +160,67 @@ export default function ConversationView({
    * startListening() below for the push-to-talk flow.
    */
 
-  // Voice output (TTS) with native engine
-  const speakText = (text: string, lang: Language, messageId: string) => {
-    if (!window.speechSynthesis) return;
+  /**
+   * Voice playback on THIS device is LOCAL (Phase 7B).
+   *
+   * The browser engine was removed from this component: `speechSynthesis` is
+   * implemented by the operating system or the browser vendor and, on several
+   * platforms, by a remote service, which contradicts the local-first guarantee
+   * the rest of the app is built on. The text now goes to
+   * /api/speech/synthesize, which runs Pocket TTS on this machine and returns a
+   * clip this browser only plays.
+   *
+   * Synthesis takes a few seconds on CPU, so the button shows a spinner while the
+   * clip is being produced; the same clip is then served from memory on replay.
+   */
+  const speakText = async (text: string, lang: Language, messageId: string) => {
+    const requestId = speechRequestRef.current + 1;
+    speechRequestRef.current = requestId;
 
-    if (currentlySpeakingId === messageId) {
-      window.speechSynthesis.cancel();
+    const wasSpeaking = currentlySpeakingId === messageId;
+    speechAbortRef.current?.abort();
+    speechAbortRef.current = null;
+    stopLocalPlayback();
+
+    if (wasSpeaking) {
       setCurrentlySpeakingId(null);
+      setIsSpeechLoading(false);
       return;
     }
 
-    window.speechSynthesis.cancel();
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voices = window.speechSynthesis.getVoices();
-    let targetVoice = null;
-
-    if (lang === Language.ENGLISH) {
-      targetVoice = voices.find(v => v.lang.startsWith("en")) || null;
-      utterance.lang = "en-US";
-    } else {
-      const config = LOCAL_LANGUAGES.find(l => l.value === lang);
-      const ttsLang = config ? config.ttsCode : "sw-KE";
-      targetVoice = voices.find(v => v.lang.startsWith(ttsLang.split("-")[0])) || null;
-      utterance.lang = ttsLang;
-    }
-
-    if (targetVoice) utterance.voice = targetVoice;
-
-    utterance.onend = () => setCurrentlySpeakingId(null);
-    utterance.onerror = () => setCurrentlySpeakingId(null);
-
+    setError(null);
     setCurrentlySpeakingId(messageId);
-    window.speechSynthesis.speak(utterance);
+    setIsSpeechLoading(true);
+
+    try {
+      await playLocalSpeech(text, lang, { signal: controller.signal });
+    } catch (err) {
+      if (speechRequestRef.current !== requestId) return;
+      // An input problem has an actionable reason ("too long", "English and
+      // French only"); anything else is an engine failure and gets the banner
+      // this phase specifies.
+      setError(
+        err instanceof LocalSpeechError && err.inputProblem
+          ? err.message
+          : "Local voice playback unavailable."
+      );
+    } finally {
+      if (speechRequestRef.current === requestId) {
+        setCurrentlySpeakingId(null);
+        setIsSpeechLoading(false);
+        speechAbortRef.current = null;
+      }
+    }
   };
+
+  /**
+   * Leaving the conversation releases the browser-side clips; the server drops
+   * its own cache on the same hook that ends the session.
+   */
+  useEffect(() => () => releasePlaybackCache(), []);
 
   /**
    * Push-to-talk with the LOCAL engine (Phase 7A).
@@ -193,10 +239,8 @@ export default function ConversationView({
       return;
     }
 
-    if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-      setCurrentlySpeakingId(null);
-    }
+    stopLocalPlayback();
+    setCurrentlySpeakingId(null);
 
     currentListeningUserRef.current = user;
     setCurrentUser(user);
@@ -340,12 +384,14 @@ export default function ConversationView({
       const revisedMessages = [...messages, newMessage];
       onUpdateMessages(revisedMessages);
 
-      // Speak translation out loud automatically on target side
+      // Speak the translation out loud on the target side. Playback runs on this
+      // machine (Phase 7B) and costs seconds of CPU per line, so auto-play only
+      // covers lines inside the limit; longer ones stay available through the
+      // speaker button, which explains the limit instead of failing silently.
       if (isAutoTtsEnabled) {
-        if (sender === "doctor") {
-          speakText(translation, selectedLocalLanguage, newMessage.id);
-        } else {
-          speakText(translation, Language.ENGLISH, newMessage.id);
+        const spokenLanguage = sender === "doctor" ? selectedLocalLanguage : Language.ENGLISH;
+        if (canPlayLocally(translation, spokenLanguage)) {
+          void speakText(translation, spokenLanguage, newMessage.id);
         }
       }
 
@@ -554,34 +600,45 @@ export default function ConversationView({
 
   const labels = getDomainLabel();
 
-  // AI onboarding voice-assist player
-  const playVoiceFirstGreeting = () => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
+  /**
+   * AI onboarding voice-assist player.
+   *
+   * The greeting travels the same path as the speaker buttons: the text goes to
+   * /api/speech/synthesize, Pocket TTS produces a clip on this machine, and the
+   * browser only plays it. Languages without a local voice in this build (Swahili
+   * and the East African set) skip the spoken greeting and go straight to the mic,
+   * so nothing is ever handed to a browser or cloud voice.
+   */
+  const playVoiceFirstGreeting = async () => {
+    if (!localSpeechLanguage(selectedLocalLanguage)) {
+      await startListening("patient");
+      return;
+    }
 
-    setError(`AI Voice Greeting in ${selectedLocalLanguage} is playing out loud. Listen...`);
+    const greetingNotice = `AI Voice Greeting in ${selectedLocalLanguage} is playing out loud. Listen...`;
+    setError(greetingNotice);
 
-    const utterance = new SpeechSynthesisUtterance(labels.welcomePrompt);
-    const config = LOCAL_LANGUAGES.find(l => l.value === selectedLocalLanguage);
-    const ttsLang = config ? config.ttsCode : "sw-KE";
-    utterance.lang = ttsLang;
+    const controller = new AbortController();
+    speechAbortRef.current = controller;
+    setIsSpeechLoading(true);
     
-    const voices = window.speechSynthesis.getVoices();
-    const matchingVoice = voices.find(v => v.lang.startsWith(ttsLang.split("-")[0])) || null;
-    if (matchingVoice) utterance.voice = matchingVoice;
-
-    utterance.onend = () => {
-      setError(null);
+    try {
+      await playLocalSpeech(labels.welcomePrompt, selectedLocalLanguage, { signal: controller.signal });
+    } catch (err) {
+      setError(
+        err instanceof LocalSpeechError && err.inputProblem
+          ? err.message
+          : "Local voice playback unavailable."
+      );
+    } finally {
+      speechAbortRef.current = null;
+      setIsSpeechLoading(false);
+      // Clear only our own notice: a real engine failure stays on screen while the
+      // mic opens anyway, so the conversation never stalls on a missing voice.
+      setError((current) => (current === greetingNotice ? null : current));
       // Automatically trigger chosen mic listen block to make the interaction ultra smooth
-      startListening("patient");
-    };
-
-    utterance.onerror = () => {
-      setError(null);
-      startListening("patient");
-    };
-
-    window.speechSynthesis.speak(utterance);
+      void startListening("patient");
+    }
   };
 
   // Skip wizard back-door trigger: starts the session with a placeholder profile
@@ -630,9 +687,14 @@ export default function ConversationView({
               checked={isAutoTtsEnabled} 
               onChange={(e) => {
                 setIsAutoTtsEnabled(e.target.checked);
-                if (!e.target.checked && window.speechSynthesis) {
-                  window.speechSynthesis.cancel();
+                if (!e.target.checked) {
+                  // Switching off stops the local clip immediately; nothing is
+                  // left playing and nothing keeps being synthesized.
+                  speechAbortRef.current?.abort();
+                  speechAbortRef.current = null;
+                  stopLocalPlayback();
                   setCurrentlySpeakingId(null);
+                  setIsSpeechLoading(false);
                 }
               }} 
               className="rounded border-slate-300 text-slate-700 h-4 w-4 cursor-pointer"
@@ -720,19 +782,32 @@ export default function ConversationView({
             {messages.map((msg) => {
               const speakTargetText = msg.sender === "doctor" ? msg.text : msg.translation;
               const isSpeaking = currentlySpeakingId === msg.id;
+              const isLoadingThis = isSpeaking && isSpeechLoading;
 
               return (
                 <div key={msg.id} className="flex flex-col items-end group/msg">
                   <div className="flex items-center gap-2.5 max-w-[90%] justify-end">
                     <button 
                       onClick={() => speakText(speakTargetText, Language.ENGLISH, msg.id)}
+                      disabled={isLoadingThis}
+                      title={
+                        isLoadingThis
+                          ? "Producing the clip with the local voice engine..."
+                          : canPlayLocally(speakTargetText, Language.ENGLISH)
+                            ? "Play this line with the local voice engine"
+                            : `Local voice playback covers English and French lines up to ${MAX_LOCAL_SPEECH_CHARS} characters`
+                      }
                       className={`p-2 rounded-full transition-all border shrink-0 ${
                         isSpeaking 
                           ? "bg-slate-900 text-white shadow-sm scale-105 border-slate-755" 
                           : "text-slate-400 hover:text-slate-900 bg-white border-slate-100 hover:border-slate-300 opacity-100 lg:opacity-0 group-hover/msg:opacity-100"
                       }`}
                     >
-                      <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
+                      {isLoadingThis ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
+                      )}
                     </button>
                     <div className={`p-4 rounded-2xl rounded-tr-none text-sm leading-relaxed shadow-xs transition-all ${
                       msg.sender === "doctor" 
@@ -891,6 +966,7 @@ export default function ConversationView({
             {messages.map((msg) => {
               const speakTargetText = msg.sender === "doctor" ? msg.translation : msg.text;
               const isSpeaking = currentlySpeakingId === msg.id;
+              const isLoadingThis = isSpeaking && isSpeechLoading;
 
               return (
                 <div key={msg.id} className="flex flex-col items-start group/msg">
@@ -904,13 +980,25 @@ export default function ConversationView({
                     </div>
                     <button 
                       onClick={() => speakText(speakTargetText, selectedLocalLanguage, msg.id)}
+                      disabled={isLoadingThis}
+                      title={
+                        isLoadingThis
+                          ? "Producing the clip with the local voice engine..."
+                          : canPlayLocally(speakTargetText, selectedLocalLanguage)
+                            ? "Play this line with the local voice engine"
+                            : `Local voice playback covers English and French lines up to ${MAX_LOCAL_SPEECH_CHARS} characters`
+                      }
                       className={`p-2 rounded-full transition-all border shrink-0 ${
                         isSpeaking 
                           ? "bg-slate-800 text-white shadow-sm scale-105 border-slate-700" 
                           : "text-slate-400 hover:text-slate-900 bg-white border-slate-100 hover:border-slate-300 opacity-100 lg:opacity-0 group-hover/msg:opacity-100"
                       }`}
                     >
-                      <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
+                      {isLoadingThis ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Volume2 className={`h-3.5 w-3.5 ${isSpeaking ? "animate-pulse" : ""}`} />
+                      )}
                     </button>
                   </div>
                   <span className="text-[9px] text-slate-450 mt-1 uppercase font-bold pl-1 select-none">

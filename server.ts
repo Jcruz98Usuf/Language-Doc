@@ -17,6 +17,8 @@
  *   POST /api/sessions        { domain, localLanguage }                -> { sessionId, token, expiresAt }
  *   GET  /api/sessions/:id    token via x-session-token header         -> session state (no token)
  *   DELETE /api/sessions/:id  token via header or body                 -> { success }
+ *   POST /api/transcribe      raw PCM / WAV body                       -> { text }
+ *   POST /api/speech/synthesize { text, language, voiceMode }          -> audio/wav
  *   GET  /api/capabilities                                             -> language capability states
  *   GET  /api/health                                                   -> engine status
  *
@@ -61,6 +63,13 @@ import {
 } from "./src/server/services/stt";
 import { decodeAudioPayload } from "./src/server/services/stt/audio";
 import { isSttError } from "./src/server/services/stt/types";
+import {
+  clearSpeechCache,
+  describeSpeechEngine,
+  isTtsError,
+  synthesizeSpeech,
+  warmUpSpeech,
+} from "./src/server/services/speech/ttsProvider";
 import { Language, Message } from "./src/types";
 import {
   createSession,
@@ -212,6 +221,9 @@ async function startServer(): Promise<void> {
       // separately: voice is an enhancement, translation is the critical path,
       // so a missing STT model must not mark the whole service degraded.
       stt: await describeSttEngine(),
+      // Local voice playback (Phase 7B). Reported under `speech` so input and
+      // output live side by side: model ids and availability only, no paths.
+      speech: { tts: await describeSpeechEngine() },
       // Temporary sessions: readiness + count only (no tokens, no content).
       sessions: getSessionStats(),
     });
@@ -297,6 +309,9 @@ async function startServer(): Promise<void> {
     for (const peer of io.sockets.sockets.values()) {
       if (peer.data.sessionId === sessionId) peer.disconnect(true);
     }
+    // Voice playback belongs to the conversation that just ended: drop the
+    // in-memory clips with it, on the same hook rather than a second one.
+    clearSpeechCache();
   });
 
   io.on("connection", (socket) => {
@@ -650,6 +665,72 @@ async function startServer(): Promise<void> {
   );
 
   /* ------------------------------------------------------------------ */
+  /* Local voice playback (Phase 7B, Stage 1)                            */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Speaks one line with the local Pocket TTS worker.
+   *
+   * Body: `{ text, language, voiceMode }` as JSON. `language` is `english` or
+   * `french`, `voiceMode` is `standard`; both are validated here, and a request
+   * that asks for anything else is refused rather than guessed at. The response
+   * is a complete 16-bit PCM WAV. The audio is generated on this machine and is
+   * never written to disk, so there is no file to clean up and no URL that
+   * outlives the response.
+   */
+  app.post("/api/speech/synthesize", async (req, res) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const speech = await synthesizeSpeech({
+        text: body.text,
+        language: body.language,
+        voiceMode: body.voiceMode ?? "standard",
+        signal: createRequestSignal(req, res),
+      });
+
+      // Diagnostics, matching the transcription endpoint's style: identifiers
+      // and timings only - never the text, never the audio.
+      res.setHeader("X-Speech-Provider", speech.provider);
+      res.setHeader("X-Speech-Voice", speech.voice);
+      res.setHeader("X-Speech-Duration-Ms", String(Math.round(speech.durationSeconds * 1000)));
+      res.setHeader("X-Speech-Synthesis-Ms", String(Math.round(speech.synthesisMs)));
+      res.setHeader("X-Speech-First-Audio-Ms", String(Math.round(speech.firstAudioMs)));
+      if (speech.cached) res.setHeader("X-Speech-Cached", "1");
+      if (speech.truncated) res.setHeader("X-Speech-Truncated", "1");
+
+      res.status(200).type("audio/wav").send(speech.audio);
+    } catch (error) {
+      if (isTtsError(error)) {
+        const status =
+          error.code === "cancelled"
+            ? 499
+            : error.code === "unsupported-language" ||
+                error.code === "unsupported-voice-mode" ||
+                error.code === "text-too-long" ||
+                error.code === "empty-text" ||
+                error.code === "bad-request"
+              ? 400
+              : error.code === "busy"
+                ? 429
+                : error.code === "timeout"
+                  ? 504
+                  : error.code === "synthesis-failed"
+                    ? 500
+                    : 503;
+        if (status !== 499) console.error(`[tts] ${error.code}: ${error.message}`);
+        if (!res.headersSent) res.status(status).json({ error: error.message, code: error.code });
+        return;
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[tts] unexpected failure: ${message}`);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Local voice playback failed.", code: "synthesis-failed" });
+      }
+    }
+  });
+
+  /* ------------------------------------------------------------------ */
   /* Frontend                                                            */
   /* ------------------------------------------------------------------ */
 
@@ -718,6 +799,10 @@ async function startServer(): Promise<void> {
 
     // Local speech-to-text status (host laptop voice input).
     void warmUpStt();
+
+    // Local voice playback status (Phase 7B). Reported only - the worker starts
+    // on the first replay, so a session that never uses voice pays nothing.
+    void warmUpSpeech();
   });
 }
 
