@@ -604,10 +604,20 @@ async function startServer(): Promise<void> {
       try {
         const language = readString(req.header("x-audio-language")) || readString(req.query.language) || "english";
         if (!isSpeechLanguageSupported(language)) {
+          // The requested name is echoed only when it plainly is a language name.
+          // The client renders `error` as text, so arbitrary request content - a
+          // path, a marker, four thousand characters - must not be reflected back
+          // into the response body.
+          const trimmed = language.trim();
+          const safeName = /^[A-Za-z][A-Za-z -]{1,15}$/.test(trimmed) ? trimmed : "";
           res.status(400).json({
-            error:
-              `Local speech-to-text does not support ${language} yet. ` +
-              "Please type the message instead - text is translated the same way.",
+            error: safeName
+              ?
+                `Local speech-to-text does not support ${safeName} yet. ` +
+                "Please type the message instead - text is translated the same way."
+              :
+                "Local speech-to-text does not support that language yet. " +
+                "Please type the message instead - text is translated the same way.",
             code: "unsupported-language",
           });
           return;

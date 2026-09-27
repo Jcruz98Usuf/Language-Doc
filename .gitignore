@@ -21,3 +21,14 @@ benchmarks/stt/results/
 
 # local TTS benchmark reports + sample clips (generated locally by the voice worker)
 benchmarks/tts/results/
+
+
+# vitest cache + the test server's captured output
+.vitest/
+tests/.server.log
+# where the booted server told the harness it listens (port, pid) - written per run
+tests/helpers/server-info.json
+
+# scratch output from local verification runs (tsc/vitest logs)
+.artifacts/
+
