@@ -84,7 +84,7 @@ export default class SkipReporter {
     console.log(
       "\n  The model tier (real translations, extractions and audio) needs Ollama,\n" +
         "  Pocket TTS and a Whisper engine on the machine running the suite. Run it\n" +
-        "  locally with `npm run test:all` before shipping a change to an engine.\n"
+        "  locally with `npm test` (every tier) before shipping a change to an engine.\n"
     );
 
     if (process.env.GITHUB_ACTIONS) {

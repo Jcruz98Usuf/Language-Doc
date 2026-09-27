@@ -17,7 +17,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { describe } from "vitest";
+import { describe, it } from "vitest";
 import { ROOT, SERVER_INFO, type ServerInfo } from "./bootServer";
 import { recordSkip } from "./skipFile";
 
@@ -288,6 +288,23 @@ export function suiteRequiring(label: string, available: boolean, note: string):
   recordSkip(label, note);
   console.log(`[skip] ${label} - ${note}`);
   return describe.skip as typeof describe;
+}
+
+/**
+ * The `it` for a single case inside an otherwise engine-free file.
+ *
+ * `health.*.available` means "ready to serve this request now", which is the
+ * condition that matters here: a Whisper engine can be installed and still have no
+ * weights on disk, in which case the first real audio starts a download the route
+ * deliberately does not time out (`whisperOnnxProvider.ts`: loading is unbounded, only
+ * inference is). A test that waits on that is watching a progress bar, not asserting a
+ * contract - so it reports itself as skipped instead.
+ */
+export function itRequiring(label: string, available: boolean, note: string): typeof it {
+  if (available) return it;
+  recordSkip(label, note);
+  console.log(`[skip] ${label} - ${note}`);
+  return it.skip as typeof it;
 }
 
 /**

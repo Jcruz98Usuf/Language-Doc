@@ -15,14 +15,31 @@
  *   - a value that looks like a shell command is treated as data
  *   - a refusal never leaks a filesystem path, a stack trace, or the request text
  *
- * What needs a real engine lives in tests/models instead, and says so.
+ * What needs a real engine lives in tests/models instead, and says so. One case here
+ * is the deliberate exception - it asserts how the API answers *after* an engine has
+ * taken the audio - and it skips with a printed reason wherever the weights are not
+ * already on disk, rather than spending its time on a first-use download.
  */
 
 import { describe, expect, it } from "vitest";
-import { api, findPathLeaks, serverLog } from "../helpers/harness";
+import { api, findPathLeaks, itRequiring, probeEngines, serverLog } from "../helpers/harness";
 
 /** Distinctive marker: if it ever shows up in a response or a log, it leaked. */
 const CANARY = "PHASE8-CANARY-4c1f9a";
+
+const engines = await probeEngines();
+
+/**
+ * One case in this file is not answered by validation: it asks what the API returns
+ * once an engine has accepted the audio and then failed to decode it. That needs a
+ * Whisper engine with its weights already on disk, so it is skipped - out loud - when
+ * they are not.
+ */
+const itWithStt = itRequiring(
+  "POST /api/transcribe - answer after an engine accepts audio and cannot decode it",
+  engines.stt,
+  `no cached Whisper weights to fail with (${engines.note}); a cold engine spends the request downloading them`
+);
 
 /** Bodies that must always be answered with a 400 and a machine-readable code. */
 async function expectRefusal(path: string, init: Parameters<typeof api>[1], code: string): Promise<void> {
@@ -200,7 +217,7 @@ describe("POST /api/transcribe - input contract (Phase 7A)", () => {
     expect((empty.json as { code: string }).code).toBe("bad-audio");
   });
 
-  it("answers structured JSON for audio it accepts but cannot process", async () => {
+  itWithStt("answers structured JSON for audio it accepts but cannot process", async () => {
     // Two seconds of nonsense PCM. Whether an engine is installed decides the
     // status; what must hold either way is that the answer is JSON, without paths.
     const noise = await api("/api/transcribe?rate=16000", {
