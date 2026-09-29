@@ -127,6 +127,9 @@ export async function startTestServer(): Promise<RunningServer> {
       ...process.env,
       NODE_ENV: process.env.TEST_NODE_ENV ?? "production",
       PORT: String(port),
+      // The suite talks plain HTTP to 127.0.0.1, exactly as before Phase 7C: the
+      // LAN certificate is exercised by its own test rather than by every one.
+      HTTPS_ENABLED: process.env.TEST_HTTPS_ENABLED ?? "false",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

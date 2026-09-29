@@ -540,9 +540,11 @@ class PocketTtsWorker {
     child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk: string) => {
-      // Worker diagnostics only: request text never appears in its log lines.
-      const text = sanitizeWorkerLog(String(chunk));
-      if (text) console.log(`[tts] ${text}`);
+      // Worker diagnostics only, already sanitized. Named `line` rather than `text`
+      // on purpose: this is the worker's stderr, never the text being spoken, and a
+      // log scan should never have to guess which one this is.
+      const line = sanitizeWorkerLog(String(chunk));
+      if (line) console.log(`[tts] ${line}`);
     });
 
     child.on("error", (error) => {

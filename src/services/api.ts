@@ -134,6 +134,12 @@ export interface TranscriptionResult {
   audioSeconds: number;
 }
 
+/** Which session a transcription request belongs to, when it must say so. */
+export interface TranscriptionSession {
+  sessionId: string;
+  token: string;
+}
+
 /**
  * Sends locally recorded audio to the local speech-to-text engine.
  *
@@ -144,11 +150,16 @@ export interface TranscriptionResult {
  *
  * `language` must be one the local engine supports (English, French, Swahili);
  * anything else is refused server side with a message the UI shows verbatim.
+ *
+ * `session` is what a phone sends (Phase 7C): the same token every other
+ * session-scoped request carries, in the same header. A laptop on this machine
+ * does not need it, so it stays optional rather than being faked.
  */
 export async function transcribeAudio(
   clip: { pcm16: Int16Array; sampleRate: number },
   language: string,
-  domain?: string
+  domain?: string,
+  session?: TranscriptionSession
 ): Promise<string> {
   const query = new URLSearchParams({
     language,
@@ -156,12 +167,18 @@ export async function transcribeAudio(
   });
   if (domain) query.set("domain", domain);
 
+  const headers: Record<string, string> = {
+    "Content-Type": "application/octet-stream",
+    "x-audio-language": language,
+  };
+  if (session?.sessionId && session.token) {
+    headers["x-session-id"] = session.sessionId;
+    headers["x-session-token"] = session.token;
+  }
+
   const response = await fetch(`/api/transcribe?${query.toString()}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/octet-stream",
-      "x-audio-language": language,
-    },
+    headers,
     body: new Uint8Array(clip.pcm16.buffer, clip.pcm16.byteOffset, clip.pcm16.byteLength),
   });
 

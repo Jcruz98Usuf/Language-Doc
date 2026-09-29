@@ -21,7 +21,7 @@
  *   extractProfileWithLocalModel() -> flat profile JSON (POST /api/parse-dialogue)
  */
 
-import { askModel, truncateForLog } from "./ollama";
+import { askModel } from "./ollama";
 import { collapseDegenerateRepetition, stripCodeFences } from "./textSanitizer";
 import { createEmptyProfile, mergeDomainProfile, toAppDomain } from "../../profile";
 import type { DomainProfile } from "../../types";
@@ -525,7 +525,17 @@ async function runExtraction(
 
   const parsed = extractJsonObject(text);
   if (!parsed) {
-    console.warn(`[local-ai] ${domain} profile extraction returned unparsable JSON: ${truncateForLog(text, 200)}`);
+    // That answer is built from the conversation, so it is not logged - not even a
+    // 200-character excerpt, because it can contain the patient's own words and
+    // complaints. The log records what kind of answer came back (how long, what it
+    // opened with), which is what makes the failure diagnosable, and the caller gets
+    // an empty profile: guessing from a broken answer would be worse than saying
+    // nothing was extracted.
+    const trimmed = text.trim();
+    const opening = trimmed.length > 0 ? JSON.stringify(trimmed.slice(0, 1)) : '""';
+    console.warn(
+      `[local-ai] ${domain} profile extraction returned unparsable JSON (${trimmed.length} chars, opening ${opening})`
+    );
     return createEmptyProfile(toAppDomain(domain));
   }
 

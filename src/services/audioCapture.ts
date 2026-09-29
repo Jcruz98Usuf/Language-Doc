@@ -2,12 +2,19 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Local microphone capture for the HOST laptop (Phase 7A).
+ * Local microphone capture for the HOST laptop (Phase 7A) and, since Phase 7C,
+ * for the phone that joined the session over the LAN. One recorder, one endpoint,
+ * one engine - so a browser and a laptop take the identical path to Whisper.
  *
  * Records raw PCM with the Web Audio API and returns 16 kHz mono samples ready
- * for POST /api/transcribe. It deliberately does NOT use the browser's
- * SpeechRecognition API: on Chrome that uploads audio to a remote service, which
- * is exactly the privacy gap this phase closes.
+ * for POST /api/transcribe. It deliberately does NOT use the browser's own speech
+ * recogniser: on Chrome that uploads audio to a remote service, which is exactly
+ * the privacy gap this closes.
+ *
+ * That paragraph is worded on purpose. This `@license` header is the one comment
+ * the build keeps verbatim in `dist/`, and the shipped bundle is scanned for the
+ * recogniser's own identifier - so naming it here would put the very string the
+ * scan forbids into the artefact the scan protects. Say it in prose instead.
  *
  * The resampling/PCM helpers are intentionally duplicated (not imported) from
  * the server's stt/audio.ts: that module is Node-only (Buffer) and must never be
@@ -19,6 +26,16 @@ export const TARGET_SAMPLE_RATE = 16_000;
 /** Hard cap: a runaway recording is truncated rather than rejected. */
 const MAX_SECONDS = 60;
 const MIN_SECONDS = 0.35;
+
+/**
+ * How long `resume()` is given before capture carries on without it.
+ *
+ * Bounded on purpose. WebKit can leave that promise pending for a context it does
+ * not consider gesture-started, and an unbounded wait on it is a microphone button
+ * stuck on "waiting for the microphone" for a microphone the user has already
+ * granted.
+ */
+const RESUME_GRACE_MS = 600;
 
 export interface RecordedClip {
   /** Mono, little-endian, 16-bit signed PCM at 16 kHz. */
@@ -52,6 +69,87 @@ export function captureFailureReason(): string | null {
     return "Voice input needs a secure connection (HTTPS or localhost). Please type the message - it is translated the same way.";
   }
   return null;
+}
+
+/**
+ * What this device reports about its own ability to capture, for the one question a
+ * terminal and a server log cannot answer: why is the microphone button grey on the
+ * phone? The phone is the only machine that knows, so the answer has to be readable
+ * there - the participant view prints this on screen.
+ *
+ * Every field is something the browser states about itself. The permission state is
+ * deliberately NOT part of the verdict: `captureFailureReason()` above never
+ * consults it, because `permissions.query({ name: "microphone" })` throws on iOS
+ * Safari and, on browsers that do implement it, can still answer "prompt" while the
+ * microphone is already granted. Readiness is therefore decided from capability
+ * alone, and attempting to record is what asks for - and settles - permission.
+ */
+export interface CaptureDiagnostics {
+  secureContext: boolean;
+  mediaDevices: boolean;
+  getUserMedia: boolean;
+  audioContext: boolean;
+  /** The first condition actually blocking capture, or null when nothing is. */
+  blockedBy: string | null;
+}
+
+export function captureDiagnostics(): CaptureDiagnostics {
+  return {
+    secureContext: typeof window !== "undefined" && window.isSecureContext === true,
+    mediaDevices: typeof navigator !== "undefined" && typeof navigator.mediaDevices === "object" && navigator.mediaDevices !== null,
+    getUserMedia: typeof navigator?.mediaDevices?.getUserMedia === "function",
+    audioContext: audioContextCtor() !== null,
+    blockedBy: captureFailureReason(),
+  };
+}
+
+/**
+ * The browser's own permission state, as a string, for the diagnostic readout only.
+ *
+ * Advisory by construction and by intent: it is never an input to any decision in
+ * this app. "unsupported" is the honest answer on the browsers that cannot be asked
+ * at all (Safari rejects this query name), and an answer that cannot be trusted is
+ * not an answer a button may wait for.
+ */
+export async function queryMicrophonePermission(): Promise<string> {
+  try {
+    if (typeof navigator === "undefined" || !navigator.permissions?.query) return "unsupported";
+    const status = await navigator.permissions.query({ name: "microphone" as PermissionName });
+    return status?.state ?? "unknown";
+  } catch {
+    return "unsupported";
+  }
+}
+
+/**
+ * Turns a capture failure into the sentence a person on a phone can act on.
+ *
+ * The recorder's own messages ("too short", "no audio captured") pass through
+ * unchanged. The names below are what a refusal actually arrives as, and each one
+ * names the fallback that still works - typing, which is translated identically. A
+ * greyed-out button with a technical string under it is not an explanation.
+ */
+export function describeCaptureFailure(error: unknown): string {
+  const name = error instanceof Error ? error.name : "";
+  switch (name) {
+    case "NotAllowedError":
+    case "SecurityError":
+      return "Microphone access is blocked for this page. Allow it for this site in the browser settings, then tap the microphone again - or type the message, which is translated the same way.";
+    case "NotFoundError":
+      return "No microphone was found on this device. Please type the message - it is translated the same way.";
+    case "NotReadableError":
+      return "Another app is using the microphone. Close it and tap the microphone again - or type the message, which is translated the same way.";
+    case "OverconstrainedError":
+      return "This device's microphone cannot be opened with the requested settings. Please type the message - it is translated the same way.";
+    case "AbortError":
+      return "The microphone stopped before it started. Tap the microphone again - or type the message, which is translated the same way.";
+    case "TimeoutError":
+      return "The microphone did not answer in time. Tap the microphone again - or type the message, which is translated the same way.";
+    default:
+      return error instanceof Error && error.message
+        ? error.message
+        : "Microphone unavailable. Please type the message - it is translated the same way.";
+  }
 }
 
 function resampleLinear(input: Float32Array, from: number, to: number): Float32Array {
@@ -91,6 +189,8 @@ export class LocalAudioRecorder {
   private chunks: Float32Array[] = [];
   private frames = 0;
   private active = false;
+  /** Set by `cancel()`, including while `start()` is still waiting for permission. */
+  private cancelled = false;
 
   get isRecording(): boolean {
     return this.active;
@@ -100,11 +200,36 @@ export class LocalAudioRecorder {
     const reason = captureFailureReason();
     if (reason) throw new Error(reason);
     if (this.active) return;
+    this.cancelled = false;
 
     const AudioCtor = audioContextCtor();
     if (!AudioCtor) throw new Error("Web Audio capture is not available in this browser.");
 
-    const stream = await navigator.mediaDevices.getUserMedia({
+    // Everything above the first `await` below runs inside the tap that called this,
+    // and that is not cosmetic. Two things need that gesture and lose it afterwards:
+    //   - `getUserMedia` is what raises the permission prompt, and a mobile browser
+    //     only raises it for a live gesture;
+    //   - WebKit returns an AudioContext that is born `suspended` when it is created
+    //     outside a gesture, and a context created after the prompt is exactly that.
+    //     A context that never leaves `suspended` produces no samples at all.
+    // A phone with the microphone already granted therefore sat on "waiting for the
+    // microphone" with nothing ever settling it. The context is created first and the
+    // request is started without awaiting it, which keeps both inside the gesture.
+    let context: AudioContext;
+    try {
+      // Ask the browser for 16 kHz so it resamples for us. Not every browser
+      // honours the request, so the real rate is read back on stop() and the
+      // samples are resampled only when they differ.
+      context = new AudioCtor({ sampleRate: TARGET_SAMPLE_RATE });
+    } catch {
+      context = new AudioCtor();
+    }
+    // Started, never awaited bare: on WebKit this promise can stay pending for a
+    // context it does not consider user-started, and awaiting it here is what left
+    // `start()` unresolved - which is what froze the microphone button.
+    if (context.state === "suspended") void context.resume().catch(() => undefined);
+
+    const streamRequest = navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
@@ -113,16 +238,35 @@ export class LocalAudioRecorder {
       },
     });
 
-    // Ask the browser for 16 kHz so it resamples for us. Not every browser
-    // honours the request, so the real rate is read back on stop() and the
-    // samples are resampled only when they differ.
-    let context: AudioContext;
+    let stream: MediaStream;
     try {
-      context = new AudioCtor({ sampleRate: TARGET_SAMPLE_RATE });
-    } catch {
-      context = new AudioCtor();
+      stream = await streamRequest;
+    } catch (permissionError) {
+      // Refused, or nothing to grant to: the context opened above has no reason to
+      // stay open, and the caller turns this into a sentence naming the fallback.
+      void context.close();
+      throw permissionError;
     }
-    if (context.state === "suspended") await context.resume();
+
+    // Cancelled while the prompt was open - the page was left, or the user tapped
+    // again. The grant that has just arrived must not leave a live microphone behind.
+    if (this.cancelled) {
+      this.cancelled = false;
+      stream.getTracks().forEach((track) => track.stop());
+      void context.close();
+      return;
+    }
+
+    // Normally running by now. If it is not, give the resume one bounded chance and
+    // carry on either way: the graph below works on a suspended context, it simply
+    // produces no frames - which `stop()` reports honestly rather than leaving this
+    // promise, and the button, unresolved.
+    if (context.state === "suspended") {
+      await Promise.race([
+        context.resume().catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, RESUME_GRACE_MS)),
+      ]);
+    }
 
     const source = context.createMediaStreamSource(stream);
     // ScriptProcessorNode is deprecated in favour of AudioWorklet, but it needs
@@ -190,6 +334,10 @@ export class LocalAudioRecorder {
 
   /** Aborts a recording without producing a clip; the mic is released at once. */
   cancel(): void {
+    // A `start()` may still be waiting for the microphone prompt. This flag is what
+    // its continuation reads to hand back whatever the browser grants afterwards;
+    // without it, cancelling before the prompt is answered left a live microphone.
+    this.cancelled = true;
     this.active = false;
     this.chunks = [];
     this.frames = 0;

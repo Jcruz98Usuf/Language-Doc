@@ -13,6 +13,11 @@
  *   - the shipped client bundle (what a browser could actually call), and
  *   - the server and client sources (so a cloud call is caught before it is ever
  *     built into something shippable).
+ *
+ * One more promise lives in the same file's remit: the server log is operational
+ * only. Ids, counts and states - never conversation text, never profile fields. It is
+ * the easiest promise of all to break by accident, because a "helpful" log of a
+ * model's own answer looks like debugging and is patient data.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -66,16 +71,20 @@ describe("no cloud or browser speech provider", () => {
   it("still catches a real browser-speech call, not just the word", () => {
     // A negative control for the control: with comments set aside, code that
     // speaks through the browser has to be caught. Both shapes below are what a
-    // regression would look like, and neither is a comment.
+    // regression would look like, and neither is a comment. Phase 7C moved phone
+    // recognition to the laptop's Whisper engine, which also put the browser's own
+    // recogniser on the banned list - the control has to see that one come back too.
     const reintroduced = `
       const voice = () => {
         window.speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+        const recognition = new webkitSpeechRecognition();
       };
     `;
     const caught = BANNED_ENGINE_REFERENCES.filter(([, banned]) => banned.test(stripComments(reintroduced)));
 
     expect(caught.map(([name]) => name)).toContain("browser speechSynthesis API");
     expect(caught.map(([name]) => name)).toContain("SpeechSynthesisUtterance");
+    expect(caught.map(([name]) => name)).toContain("browser SpeechRecognition API");
   });
 
   it("declares no cloud provider in the health payload", async () => {
@@ -132,5 +141,28 @@ describe("no cloud or browser speech provider", () => {
     }
 
     expect(leaked).toEqual([]);
+  });
+
+  it("keeps conversation content and model answers out of the server log", () => {
+    // Two things broke this promise by accident, both looking like debugging: a failed
+    // profile extraction logged 200 characters of the model's own answer, which is
+    // assembled from the conversation, and the local voice worker's stderr was logged
+    // through a variable called `text`, so a content leak looked plausible there too.
+    // The check is a bounded window around each log call, because the interesting
+    // template literal is often on the next line.
+    const leaks: string[] = [];
+
+    for (const file of collectFiles(`${ROOT}/src/server`, /\.ts$/)) {
+      const source = readFileSync(file, "utf8");
+      for (const call of source.matchAll(/console\.(?:log|warn|error)\([\s\S]{0,240}?\)/g)) {
+        const body = call[0];
+        const carriesContent =
+          /\$\{\s*(?:text|transcript|transcription|profile)\b/.test(body) ||
+          /truncateForLog\(\s*text\b/.test(body);
+        if (carriesContent) leaks.push(`${file.replace(`${ROOT}/`, "")}: ${body.slice(0, 120)}`);
+      }
+    }
+
+    expect(leaks).toEqual([]);
   });
 });

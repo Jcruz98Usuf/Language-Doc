@@ -28,6 +28,14 @@ export interface TranslationSession {
   clientConnected: boolean;
 
   /**
+   * The device that owns the client (participant) role, or null before anyone has
+   * claimed it. A random per-browser identifier, never a person: it exists so the
+   * session can tell "the phone that joined" from "a different phone holding the
+   * same link", and it survives disconnections on purpose - see claimClientRole().
+   */
+  clientId: string | null;
+
+  /**
    * Temporary structured profile for this session. Kept here (not only in the
    * browser) so endSession() can also drop it from server memory.
    */

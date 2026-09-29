@@ -16,6 +16,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { describe, it } from "vitest";
 import { ROOT, SERVER_INFO, type ServerInfo } from "./bootServer";
@@ -83,14 +84,18 @@ export interface ApiRequest {
   timeoutMs?: number;
 }
 
-/** Sends one real request to the server under test. */
-export async function api(pathname: string, init: ApiRequest = {}): Promise<ApiResponse> {
+/** Sends one real request to an explicit origin. `api()` is the common case. */
+export async function request(
+  origin: string,
+  pathname: string,
+  init: ApiRequest = {}
+): Promise<ApiResponse> {
   const started = Date.now();
   const isPlain = init.body !== undefined && !(init.body instanceof Buffer) && typeof init.body !== "string";
   const headers: Record<string, string> = { ...(init.headers ?? {}) };
   if (isPlain && !headers["content-type"]) headers["content-type"] = "application/json";
 
-  const response = await fetch(`${baseUrl()}${pathname}`, {
+  const response = await fetch(`${origin}${pathname}`, {
     method: init.method ?? "GET",
     headers,
     body:
@@ -112,6 +117,38 @@ export async function api(pathname: string, init: ApiRequest = {}): Promise<ApiR
   }
 
   return { status: response.status, headers: response.headers, json, text, bytes, durationMs: Date.now() - started };
+}
+
+/** Sends one real request to the server under test. */
+export async function api(pathname: string, init: ApiRequest = {}): Promise<ApiResponse> {
+  return request(baseUrl(), pathname, init);
+}
+
+/**
+ * The addresses a device on the same network would use to reach this server.
+ *
+ * Phase 7C's whole subject is the difference between a laptop on loopback and a
+ * phone across the LAN, so the suite has to speak from the LAN side too. Same
+ * filter the server applies to its own join URLs: no loopback, no APIPA address.
+ * Empty on a machine with no LAN address, where those cases say so and stand
+ * down rather than silently testing nothing.
+ */
+export function lanAddresses(): string[] {
+  const found: string[] = [];
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      if (entry.address.startsWith("169.254.")) continue;
+      found.push(entry.address);
+    }
+  }
+  return found;
+}
+
+/** The same origin as `baseUrl()`, reached over the LAN interface instead. */
+export function lanBaseUrl(scheme: "http" | "https" = "http"): string | null {
+  const address = lanAddresses()[0];
+  return address ? `${scheme}://${address}:${serverInfo().port}` : null;
 }
 
 /** `x-session-token` is the documented transport; see server.ts readSessionToken. */
@@ -158,6 +195,11 @@ export function findPathLeaks(text: string): string[] {
 export const BANNED_ENGINE_REFERENCES: Array<[string, RegExp]> = [
   ["browser speechSynthesis API", /speechSynthesis/i],
   ["SpeechSynthesisUtterance", /SpeechSynthesisUtterance/i],
+  // Phase 7C: recognition moved to the local Whisper engine, so the browser's
+  // own recogniser must stay out of the client too. Case-sensitive on purpose -
+  // `automatic-speech-recognition` is the name of a local pipeline, not a cloud
+  // call, and must not be flagged by a scan for the cloud one.
+  ["browser SpeechRecognition API", /webkitSpeechRecognition|SpeechRecognition/],
   ["Google Cloud TTS", /texttospeech\.googleapis/i],
   ["Azure/Bing speech", /speech\.platform\.bing|cognitive-services/i],
   ["OpenAI audio endpoint", /\/v1\/audio\/speech/i],

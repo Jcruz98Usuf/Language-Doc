@@ -103,6 +103,8 @@ export function createSession(options: CreateSessionOptions): { session: Transla
     messages: [],
     hostConnected: true,
     clientConnected: false,
+    // Nobody owns the client role until a phone joins (see claimClientRole).
+    clientId: null,
     profile: options.profile ?? null,
   };
 
@@ -142,6 +144,63 @@ export function validateSessionToken(sessionId: unknown, token: unknown): boolea
   }
   return tokensMatch(session.token, token);
 }
+
+/**
+ * Who is allowed to hold the client (participant) role of this session.
+ *
+ * The pairing token proves the *session*; this proves the *device*. Without it, a
+ * phone that vanished abnormally - powered off, crashed, swallowed by the browser -
+ * leaves the role apparently free, and anyone else holding the join link can take
+ * it. A clinic session cannot work that way: the link is on a screen, in a photo, in
+ * a browser history, and the person it was meant for is the only one who should
+ * ever be the patient side of the conversation.
+ *
+ * The binding is claimed by the first device that joins and is never released by a
+ * disconnection, however that disconnection looks. Only three things release it, and
+ * all three delete the session itself:
+ *   - the participant ending the session deliberately (the phone's own "End session"
+ *     choice, which calls the same DELETE the host uses),
+ *   - the host ending it,
+ *   - expiry (or the sweep that enforces it).
+ *
+ * Outcomes, and what the caller must do with each:
+ *   - "bound"   - first join: this device now owns the role;
+ *   - "resumed" - the same device coming back (a dropped network, or a deliberate
+ *                 leave-and-rejoin): allowed, and it *is* the same binding;
+ *   - "foreign" - a different device, or one that names no device at all: refused.
+ *                 Deliberately refused even while the owner's socket is connected,
+ *                 and deliberately refused while it is offline for an unknown
+ *                 reason - "unknown" must never read as "available".
+ */
+export type ClientRoleClaim = "bound" | "resumed" | "foreign";
+
+export function claimClientRole(sessionId: unknown, clientId: unknown): ClientRoleClaim {
+  if (typeof sessionId !== "string" || !sessionId) return "foreign";
+  const session = getSession(sessionId);
+  if (!session) return "foreign";
+
+  // A participant must name its device. Treating a missing identifier as "probably
+  // the same device" is exactly how a second phone used to take over silently.
+  if (typeof clientId !== "string" || clientId.trim().length === 0) return "foreign";
+  const claimed = clientId.trim();
+
+  if (session.clientId === null) {
+    session.clientId = claimed;
+    return "bound";
+  }
+
+  // Constant-time comparison, like the token: the bound identifier is not a secret
+  // in itself, but there is no reason to leak it one byte at a time either.
+  return tokensMatch(session.clientId, claimed) ? "resumed" : "foreign";
+}
+
+/**
+ * Shown verbatim to a device that is refused the client role. It states a fact about
+ * the session rather than reporting an error code, because the person holding the
+ * second phone has to understand that the link is not broken - it belongs to the
+ * device that got there first.
+ */
+export const CLIENT_ROLE_TAKEN_MESSAGE = "This session already has a connected participant.";
 
 /** Everything a token holder may see - never the token itself. */
 export function toPublicSession(session: TranslationSession): PublicSession {
@@ -201,6 +260,9 @@ function dropSession(session: TranslationSession, reason: SessionRemovalReason):
   session.messages = [];
   session.profile = null;
   session.token = "";
+  // The device binding goes with the session: it is only ever released by the
+  // session ending, never by a device walking away.
+  session.clientId = null;
   sessions.delete(session.id);
 
   // Operational log only: id and reason, never content.

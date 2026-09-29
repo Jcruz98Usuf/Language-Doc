@@ -31,11 +31,19 @@ export default function SummaryView({ profile, conversation, domain }: SummaryVi
   }, [profile, conversation, domain]);
 
   const handleCopy = () => {
-    if (summary) {
-      navigator.clipboard.writeText(summary);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
+    if (!summary) return;
+    // A clipboard write can be refused (insecure context, permission, or no
+    // clipboard at all). Left unhandled, that rejection is the only evidence the
+    // button did nothing - and the toast would claim a copy that never happened.
+    void navigator.clipboard
+      .writeText(summary)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        // Refused: say nothing rather than lie about a copy.
+      });
   };
 
   const getTheme = () => {

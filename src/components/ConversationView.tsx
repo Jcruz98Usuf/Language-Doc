@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type MouseEvent } from "react";
 import { Send, Languages, Mic, MicOff, Volume2, Sparkles, Activity, AlertCircle, RefreshCw, Loader2 } from "lucide-react";
 import { DomainProfile, Message, Language, AppDomain } from "../types";
 import { translateText, parseDialogue, fetchCapabilities, transcribeAudio, type LanguageCapability } from "../services/api";
@@ -327,16 +327,34 @@ export default function ConversationView({
   const EXTRACT_DEBOUNCE_MS = 3500;
   const extractionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestExtractionRef = useRef<{ messages: Message[]; domain: string } | null>(null);
+  /** Set when this view goes away, so a pending extraction cannot update a gone tree. */
+  const goneRef = useRef(false);
+
+  useEffect(() => {
+    // Unmount-safe. A debounce that fires after this view is gone would ask the local
+    // engine for a profile nobody is looking at, and the answer would then be pushed
+    // into a parent that has already moved on. The ref is re-armed as well as cleared,
+    // because StrictMode runs this setup/cleanup pair twice on the same instance.
+    goneRef.current = false;
+    return () => {
+      goneRef.current = true;
+      if (extractionTimerRef.current) clearTimeout(extractionTimerRef.current);
+      extractionTimerRef.current = null;
+      latestExtractionRef.current = null;
+    };
+  }, []);
 
   const runProfileExtraction = async (msgs: Message[], dom: string) => {
     try {
       const parsed = await parseDialogue(msgs, dom);
       // The server validated and shaped the profile (Phase 2); the merge that
       // protects confirmed values happens in App.handleProfileUpdate().
+      if (goneRef.current) return;
       if (parsed && typeof parsed === "object") {
         onUpdateProfile(parsed);
       }
     } catch (parseErr) {
+      if (goneRef.current) return;
       console.error("Dialogue extraction parse failed:", parseErr);
     }
   };
@@ -411,7 +429,7 @@ export default function ConversationView({
     translateAndSendMessageRef.current = translateAndSendMessage;
   });
 
-  const handleSendMessage = async (e: any) => {
+  const handleSendMessage = async (e: MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
     const textToSend = inputText.trim() || interimTranscript.trim();
     if (!textToSend || isTranslating) return;

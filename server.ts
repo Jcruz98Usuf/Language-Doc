@@ -36,6 +36,8 @@
 import express from "express";
 import type { Request, Response } from "express";
 import { createServer } from "http";
+import { createServer as createSecureServer } from "https";
+import { existsSync, readFileSync } from "fs";
 import path from "path";
 import os from "os";
 import { randomUUID } from "crypto";
@@ -72,6 +74,8 @@ import {
 } from "./src/server/services/speech/ttsProvider";
 import { Language, Message } from "./src/types";
 import {
+  CLIENT_ROLE_TAKEN_MESSAGE,
+  claimClientRole,
   createSession,
   endSession,
   getSession,
@@ -92,6 +96,64 @@ const HOST_URL = (process.env.HOST_URL ?? "").replace(/\/$/, "");
 const MAX_MESSAGE_CHARS = 4000;
 
 /**
+ * LAN HTTPS for the participant phone (Phase 7C).
+ *
+ * A phone only hands over its microphone when the page is in a secure context,
+ * and `http://<lan-ip>` never is one - so phone voice input needs real TLS with
+ * a certificate the device has been told to trust. `npm run cert:lan` produces
+ * that certificate with mkcert (see docs/phone-voice-demo.md). Nothing here
+ * weakens the browser: no tunnel, no self-signed click-through, no insecure
+ * origin flag - the device validates the chain or the page does not load.
+ *
+ * When a certificate is present TLS is the *only* listener. Socket.IO attaches to
+ * a single HTTP(S) server (engine.io's `attach()` takes one server, not a list),
+ * so running plain HTTP beside HTTPS would split every session in two: a host on
+ * `http://localhost` and a phone on `https://<lan-ip>` would land in different
+ * rooms and never see each other's messages. One listener keeps both devices in
+ * the same room, on the scheme the phone requires.
+ */
+interface TlsMaterial {
+  key: string;
+  cert: string;
+  /** Where the material came from, for the startup log only. */
+  source: string;
+}
+
+/** Certificate material for this boot, or null when this instance is plain HTTP. */
+function resolveTlsMaterial(): TlsMaterial | null {
+  const setting = (process.env.HTTPS_ENABLED ?? "").trim().toLowerCase();
+  if (setting === "false" || setting === "0" || setting === "off") return null;
+
+  const keyPath = path.resolve(process.cwd(), process.env.TLS_KEY_PATH ?? "certs/key.pem");
+  const certPath = path.resolve(process.cwd(), process.env.TLS_CERT_PATH ?? "certs/cert.pem");
+  if (!existsSync(keyPath) || !existsSync(certPath)) {
+    if (setting === "true" || setting === "1" || setting === "on") {
+      console.error(
+        `[tls] HTTPS_ENABLED is set but no certificate pair was found at ${keyPath} / ${certPath}; ` +
+          "serving plain HTTP. Run `npm run cert:lan` to create one."
+      );
+    }
+    return null;
+  }
+
+  try {
+    return {
+      key: readFileSync(keyPath, "utf8"),
+      cert: readFileSync(certPath, "utf8"),
+      source: `${path.basename(certPath)} + ${path.basename(keyPath)}`,
+    };
+  } catch (error) {
+    console.error(`[tls] certificate could not be read (${error instanceof Error ? error.message : String(error)}); serving plain HTTP.`);
+    return null;
+  }
+}
+
+const TLS = resolveTlsMaterial();
+
+/** Scheme every join URL and every advertised origin uses for this boot. */
+const SECURE_SCHEME = TLS ? "https" : "http";
+
+/**
  * Origins offered for private-session join links (`/join/<id>`).
  *
  * `HOST_URL`, when set, is listed first as an explicit override; every
@@ -99,19 +161,22 @@ const MAX_MESSAGE_CHARS = 4000;
  * on the same LAN can scan without any configuration. Loopback is never
  * offered - it is unreachable from another device.
  */
-function buildJoinUrls(sessionId: string): string[] {
+function lanOrigins(): string[] {
   const origins: string[] = [];
   if (HOST_URL) origins.push(HOST_URL);
   for (const entries of Object.values(os.networkInterfaces())) {
     for (const entry of entries ?? []) {
       if (entry.family !== "IPv4" || entry.internal) continue;
       if (entry.address.startsWith("169.254.")) continue;
-      origins.push(`http://${entry.address}:${PORT}`);
+      origins.push(`${SECURE_SCHEME}://${entry.address}:${PORT}`);
     }
   }
-  const uniqueOrigins = [...new Set(origins)];
+  return [...new Set(origins)];
+}
+
+function buildJoinUrls(sessionId: string): string[] {
   const joinPath = `/join/${encodeURIComponent(sessionId)}`;
-  return uniqueOrigins.map((origin) => `${origin}${joinPath}`);
+  return lanOrigins().map((origin) => `${origin}${joinPath}`);
 }
 
 /**
@@ -166,6 +231,17 @@ function readString(value: unknown): string {
  *   - also accepted: `Authorization: Bearer <token>` (for future Socket.IO/QR clients)
  * The token is never accepted from a URL and is never logged.
  */
+/**
+ * Socket.IO passes `message` to the client and nothing else, so a machine-readable
+ * reason for a refusal rides along in `data`. The phone branches on a code instead of
+ * on English prose, which keeps the wording of those sentences free to change.
+ */
+function withCode(error: Error, code: string): Error {
+  (error as Error & { data?: unknown }).data = { code };
+  return error;
+}
+
+/** Reads the session token from the header, or from a Bearer authorization. */
 function readSessionToken(req: Request): string {
   const header = readString(req.header("x-session-token"));
   if (header) return header;
@@ -173,6 +249,58 @@ function readSessionToken(req: Request): string {
   const authorization = readString(req.header("authorization"));
   const match = /^Bearer\s+(.+)$/i.exec(authorization);
   return match ? match[1].trim() : "";
+}
+
+/**
+ * True when the request arrived through this machine's own loopback interface.
+ *
+ * Phase 7A could leave `POST /api/transcribe` unauthenticated because the only
+ * caller was a browser tab on this laptop. Phase 7C adds a caller across the LAN,
+ * so the distinction now carries weight: loopback keeps the behaviour the laptop
+ * path was built and tested against, anything else has to name the session its
+ * audio belongs to.
+ */
+function isLoopbackRequest(req: Request): boolean {
+  const raw = req.socket.remoteAddress ?? "";
+  // Node reports IPv4 peers to a dual-stack socket as `::ffff:a.b.c.d`.
+  const address = raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+  return address === "::1" || address.startsWith("127.");
+}
+
+/**
+ * Session guard for `POST /api/transcribe` (Phase 7C, Step 3).
+ *
+ * Runs before the body parser, so audio from a device that cannot prove which
+ * session it belongs to is never read into memory at all. A phone carries the
+ * token exactly as every other session-scoped route does (`x-session-token`, or
+ * `Authorization: Bearer`), and a token that does not belong to the session it
+ * names is refused rather than honoured.
+ */
+function requireTranscribeAuth(req: Request, res: Response, next: express.NextFunction): void {
+  if (isLoopbackRequest(req)) {
+    next();
+    return;
+  }
+
+  const sessionId = readString(req.header("x-session-id"));
+  const token = readSessionToken(req);
+  const refused = "Please reopen the session from the QR code - typing still works and is translated the same way.";
+
+  if (!sessionId || !token) {
+    res.status(401).json({
+      error: `Voice input from another device must be paired with a session. ${refused}`,
+      code: "token-required",
+    });
+    return;
+  }
+  if (!validateSessionToken(sessionId, token)) {
+    res.status(403).json({
+      error: `That pairing does not belong to this session. ${refused}`,
+      code: "invalid-token",
+    });
+    return;
+  }
+  next();
 }
 
 /** Maps a client supplied language name onto the Language enum. */
@@ -184,7 +312,9 @@ function readLanguage(value: unknown): Language {
 
 async function startServer(): Promise<void> {
   const app = express();
-  const httpServer = createServer(app);
+  // TLS when a LAN certificate exists, plain HTTP when it does not - see the
+  // note above `resolveTlsMaterial` for why there is never one beside the other.
+  const httpServer = TLS ? createSecureServer({ key: TLS.key, cert: TLS.cert }, app) : createServer(app);
   const io = new SocketServer(httpServer, { path: "/socket.io" });
   const config = getOllamaConfig();
 
@@ -271,12 +401,40 @@ async function startServer(): Promise<void> {
     });
   });
 
+  /**
+   * Socket handshake: the token proves the session, the device identifier proves who
+   * owns the client role.
+   *
+   * Socket.IO only carries `message` to the client by default, so a machine-readable
+   * `data.code` is attached to each refusal. The phone branches on the code instead
+   * of on English prose, which keeps the sentences free to change.
+   */
   io.use((socket, next) => {
-    const { sessionId, token, role } = socket.handshake.auth as Record<string, unknown>;
+    const { sessionId, token, role, clientId } = socket.handshake.auth as Record<string, unknown>;
     if ((role !== "host" && role !== "participant") || !validateSessionToken(sessionId, token)) {
-      next(new Error("Unauthorized private session."));
+      next(withCode(new Error("Unauthorized private session."), "unauthorized"));
       return;
     }
+
+    /**
+     * Device binding: the first device to join owns the client role for the life of
+     * the session, and only that device may (re)take it - whether it is reconnecting
+     * after a dropped network, rejoining after a deliberate leave, or offline right
+     * now for a reason nobody knows.
+     *
+     * This is checked BEFORE the takeover loop below, and that order is the point: a
+     * refused device must not evict the legitimate one on its way out. Rejection is
+     * deliberately blind to whether the owner is currently connected - "we cannot
+     * tell why it is gone" is never treated as "the role is free".
+     */
+    if (role === "participant") {
+      const claim = claimClientRole(sessionId, clientId);
+      if (claim === "foreign") {
+        next(withCode(new Error(CLIENT_ROLE_TAKEN_MESSAGE), "client-bound"));
+        return;
+      }
+    }
+
     // At most one host and one participant per session - the newest connection
     // for a role WINS (reconnect takeover). A phone that sleeps and comes back
     // before its stale socket has timed out would otherwise be locked out of the
@@ -584,18 +742,25 @@ async function startServer(): Promise<void> {
   });
 
   /**
-   * Local speech-to-text for the HOST laptop (Phase 7A).
+   * Local speech-to-text for the host laptop (Phase 7A) and, since Phase 7C, for
+   * the participant phone across the LAN.
    *
    * Audio is posted here, decoded in memory, transcribed by a local engine and
    * dropped: nothing is written to disk, no audio leaves this machine, and the
-   * browser never learns which engine or model answered.
+   * browser never learns which engine or model answered. There is exactly one
+   * transcription route - a phone sends the same raw PCM a laptop sends and gets
+   * the same answer; it does not have a voice pipeline of its own.
    *
    * Body: raw 16-bit little-endian mono PCM (the browser contract), or a
    * RIFF/WAVE file. `?rate=` states the raw PCM sample rate; everything is
    * resampled to 16 kHz for Whisper.
+   *
+   * `requireTranscribeAuth` in front of the body parser means a request from
+   * another device carries a session token before a byte of audio is read.
    */
   app.post(
     "/api/transcribe",
+    requireTranscribeAuth,
     express.raw({
       type: ["application/octet-stream", "audio/wav", "audio/x-wav", "audio/webm"],
       limit: "24mb",
@@ -780,7 +945,21 @@ async function startServer(): Promise<void> {
   });
 
   httpServer.listen(PORT, "0.0.0.0", async () => {
-    console.log(`Language Doctor running on http://localhost:${PORT}`);
+    console.log(`Language Doctor running on ${SECURE_SCHEME}://localhost:${PORT}`);
+    if (TLS) {
+      console.log(
+        `LAN HTTPS: on (${TLS.source}) - a phone must have the mkcert root CA installed ` +
+          "(one time, see docs/phone-voice-demo.md)"
+      );
+      for (const origin of lanOrigins()) {
+        console.log(`  phone can join at: ${origin}`);
+      }
+    } else {
+      console.log(
+        "LAN HTTPS: off (no certificate) - a phone can still pair and type over http://, but its " +
+          "browser keeps the microphone closed outside a secure context. Run `npm run cert:lan` once to enable phone voice."
+      );
+    }
     // Memory-only temporary sessions with a periodic expiry sweep.
     startSessionSweeper();
     const sessionStats = getSessionStats();
