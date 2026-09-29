@@ -16,9 +16,10 @@ const STEPS = [
 export default function IntakeForm({ onComplete, onStepChange }: IntakeFormProps) {
   const [step, setStep] = useState(0);
   const [formData, setFormData] = useState<PatientProfile>({
-    // NOTE (Phase 2): this wizard is still clinic-only and therefore submits a
-    // PatientProfile. Hotel/office structured intake would need its own steps;
-    // the conversation extractor fills those profiles instead.
+    // NOTE (Phase 7D): this remains the clinic wizard and still submits a
+    // PatientProfile. Hotel and office now have their own wizards (see
+    // ../DomainIntake.tsx, which routes by domain); this file is unchanged by
+    // them. The fields, steps and behaviour below are exactly as they were.
     domain: AppDomain.CLINIC,
     name: "",
     age: "",

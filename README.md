@@ -116,6 +116,18 @@ this machine's own loopback interface needs no token, exactly as since Phase 7A.
 and office information is never stored in medical properties, and the client
 merge in `src/profile.ts` never lets an empty extraction erase a confirmed value.
 
+Structured intake is optional and domain-specific (Phase 7D). The welcome
+screen's "Voice First Chat" and "Shared Device" still start the conversation
+with no form at all, and the AI fills the profile as it goes. Choosing
+"Structured Intake" opens the wizard for the active domain: the original clinic
+wizard (`IntakeForm.tsx`, unchanged), plus a hotel and an office one, all sharing
+its styling (`components/intake/IntakeShell.tsx`). Each wizard can only build its
+own profile — the field names it may set are typed from the same discriminated
+union, so putting a hotel detail in a medical field is a compile error, not a
+runtime surprise. Switching domain drops the previous profile, and manual intake
+and AI extraction share one merge (`mergeDomainProfile`), so a field the operator
+typed is never overwritten by a later extraction.
+
 ### Private two-device sessions (memory only)
 
 Sessions exist so a private two-device session can be added later. They live in

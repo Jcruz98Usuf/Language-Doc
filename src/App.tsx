@@ -7,10 +7,10 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { io, type Socket } from "socket.io-client";
 import { ArrowRight, Stethoscope, ChevronRight, Hotel, Briefcase, Sparkles } from "lucide-react";
-import { AppMode, DomainProfile, Language, Message, AppDomain, PatientProfile } from "./types";
+import { AppMode, DomainProfile, Language, Message, AppDomain } from "./types";
 import { activeProfileFor, mergeDomainProfile } from "./profile";
 import { createSession, endSession, type SessionHandle } from "./services/api";
-import IntakeForm from "./components/IntakeForm";
+import DomainIntake from "./components/DomainIntake";
 import ConversationView from "./components/ConversationView";
 import SummaryView from "./components/SummaryView";
 import Header from "./components/Header";
@@ -181,14 +181,48 @@ export default function App() {
       );
     });
 
-  const handleIntakeComplete = (data: PatientProfile) => {
-    setProfile(data);
-    lockedFormFields.current = Object.entries(data)
-      .filter(([, value]) =>
-        typeof value === "string" ? value.trim().length > 0 : Array.isArray(value) && value.length > 0
+  /**
+   * Manual intake, from any of the three wizards (Phase 7D).
+   *
+   * The wizard's result goes through the *same* merge as an AI extraction, so
+   * there is one merge path in the app, not two: the stored profile is always the
+   * complete normalised shape for the active domain, and a wizard that sent a
+   * foreign field could not get it into state even if the compiler were not
+   * watching (mergeDomainProfile only copies the active domain's field list).
+   *
+   * Only fields the operator actually filled in are locked, so the extractor is
+   * still free to complete the blanks afterwards. `domain` itself is excluded:
+   * it is the discriminant, not a value, and mergeDomainProfile always sets it.
+   */
+  const handleIntakeComplete = (data: DomainProfile) => {
+    const merged = mergeDomainProfile(domain, null, data);
+    setProfile(merged);
+    lockedFormFields.current = Object.entries(merged)
+      .filter(
+        ([field, value]) =>
+          field !== "domain" &&
+          (typeof value === "string" ? value.trim().length > 0 : Array.isArray(value) && value.length > 0)
       )
       .map(([field]) => field);
     setMode(AppMode.CONVERSATION);
+  };
+
+  /**
+   * Switching domain drops the previous domain's profile outright.
+   *
+   * `activeProfileFor` (display) and `mergeDomainProfile` (update) already refuse
+   * to show or merge a foreign profile, so this is belt and braces: the stale
+   * profile leaves app state at the moment the domain changes instead of sitting
+   * in memory one render away from another domain, and the locked-field list can
+   * never carry a clinic field name into a hotel session. Switching back does not
+   * resurrect the old profile - the new session starts clean.
+   */
+  const handleDomainChange = (next: AppDomain) => {
+    if (next === domain) return;
+    setDomain(next);
+    setProfile(null);
+    setIntakeStep(0);
+    lockedFormFields.current = [];
   };
 
   /**
@@ -340,7 +374,7 @@ export default function App() {
           mode={mode} 
           intakeStep={intakeStep} 
           domain={domain} 
-          setDomain={setDomain} 
+          setDomain={handleDomainChange} 
           profile={activeProfile} 
         />
       )}
@@ -390,7 +424,7 @@ export default function App() {
                 {/* Horizontal Domain Context Picker Cards */}
                 <div className="w-full max-w-2xl px-6 grid grid-cols-3 gap-3 shrink-0">
                   <button
-                    onClick={() => setDomain(AppDomain.CLINIC)}
+                    onClick={() => handleDomainChange(AppDomain.CLINIC)}
                     className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${
                       domain === AppDomain.CLINIC 
                         ? "bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-50" 
@@ -401,7 +435,7 @@ export default function App() {
                     <span className="text-[11px] font-extrabold uppercase tracking-wider">Clinics</span>
                   </button>
                   <button
-                    onClick={() => setDomain(AppDomain.HOTEL)}
+                    onClick={() => handleDomainChange(AppDomain.HOTEL)}
                     className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${
                       domain === AppDomain.HOTEL 
                         ? "bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-50" 
@@ -412,7 +446,7 @@ export default function App() {
                     <span className="text-[11px] font-extrabold uppercase tracking-wider">Lodges</span>
                   </button>
                   <button
-                    onClick={() => setDomain(AppDomain.OFFICE)}
+                    onClick={() => handleDomainChange(AppDomain.OFFICE)}
                     className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all ${
                       domain === AppDomain.OFFICE 
                         ? "bg-violet-600 border-violet-500 text-white shadow-md shadow-violet-50" 
@@ -541,7 +575,7 @@ export default function App() {
                 exit={{ opacity: 0, y: -10 }}
                 className="max-w-3xl mx-auto"
               >
-                <IntakeForm onComplete={handleIntakeComplete} onStepChange={setIntakeStep} />
+                <DomainIntake domain={domain} onComplete={handleIntakeComplete} onStepChange={setIntakeStep} />
               </motion.div>
             )}
 
