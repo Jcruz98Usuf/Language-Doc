@@ -147,6 +147,12 @@ export interface AskModelOptions {
   timeoutMs?: number;
   /** Overrides OLLAMA_MODEL for a single call. */
   model?: string;
+  /**
+   * How long Ollama keeps the model resident after this call ("30m", "1h", or
+   * -1 to hold until shutdown). Defaults to "30m" so an idle demo does not turn
+   * the next translation into a cold start.
+   */
+  keepAlive?: string;
   /** Caller supplied cancellation (for example a disconnected HTTP client). */
   signal?: AbortSignal;
 }
@@ -170,6 +176,11 @@ function buildChatRequestBody(options: AskModelOptions, model: string, useThinkF
     model,
     messages: options.messages,
     stream: false,
+    // Ollama unloads a model after 5 idle minutes by default, which silently made
+    // the next translation pay a full reload mid-conversation - the "it got slow
+    // again" effect. Holding the model for a long window keeps a demo's pauses
+    // between sentences from turning into a cold start every few minutes.
+    keep_alive: options.keepAlive ?? "30m",
     options: {
       temperature: options.temperature ?? 0.2,
       // Small models fall into repetition loops without a penalty. Keep the

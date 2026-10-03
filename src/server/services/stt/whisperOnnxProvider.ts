@@ -177,6 +177,72 @@ function loadPipeline(spec: WhisperModelSpec): Promise<any> {
   return promise;
 }
 
+/**
+ * Warms the speech-to-text model so the *first* spoken utterance is not slowed by
+ * a cold model load.
+ *
+ * This is the point of the whole function: `readiness()` only reports whether the
+ * weights are on disk, and calling it does not put a model in memory. Without a
+ * real load here, the 2-8s ONNX session build lands inside the operator's first
+ * `POST /api/transcribe`, which is what made the first recording feel far slower
+ * than every one after it.
+ *
+ * Only models whose weights are already cached are warmed - this never triggers
+ * the one-time download in the background, because a download that finishes (or
+ * fails) unnoticed is worse than an honest first-use message.
+ */
+export async function warmUpWhisperPipelines(): Promise<{
+  warmed: string[];
+  skipped: string[];
+  error: string | null;
+}> {
+  const startedAt = Date.now();
+  const config = getWhisperOnnxConfig();
+
+  if (!isHfRuntimePresent()) {
+    return { warmed: [], skipped: [], error: "transformers.js runtime is not installed." };
+  }
+
+  const warmed: string[] = [];
+  const skipped: string[] = [];
+
+  // English first: that is the host laptop's own dictation path and the one a demo
+  // always hits. The multilingual checkpoint is warmed only if it is already local.
+  for (const name of [config.englishModel, config.multilingualModel]) {
+    if (!WHISPER_MODELS[name]) {
+      skipped.push(`${name} (unknown model)`);
+      continue;
+    }
+    const spec = resolveSpec(name);
+    if (!isWhisperModelCached(spec)) {
+      skipped.push(`${spec.label} (not downloaded yet)`);
+      continue;
+    }
+    if (pipelines.has(spec.model)) {
+      warmed.push(`${spec.label} (already loaded)`);
+      continue;
+    }
+
+    try {
+      await loadPipeline(spec);
+      warmed.push(spec.label);
+    } catch (error) {
+      // A warm-up failure must never be fatal: the same load will be retried on
+      // the first real request, which reports the error properly to the operator.
+      skipped.push(`${spec.label} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+
+  console.log(
+    `[stt] speech-to-text warm-up finished in ${Date.now() - startedAt}ms (loaded: ${
+      warmed.join(", ") || "none"
+    }${skipped.length ? `; skipped: ${skipped.join(", ")}` : ""})`
+  );
+
+  return { warmed, skipped, error: null };
+}
+
+
 /** Whisper emits markers such as "[BLANK_AUDIO]" for silence - drop them. */
 function normalizeTranscript(output: unknown): string {
   const raw = typeof (output as any)?.text === "string" ? ((output as any).text as string) : "";

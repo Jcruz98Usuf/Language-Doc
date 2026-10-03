@@ -10,6 +10,13 @@ import { ArrowRight, Stethoscope, ChevronRight, Hotel, Briefcase, Sparkles } fro
 import { AppMode, DomainProfile, Language, Message, AppDomain } from "./types";
 import { activeProfileFor, mergeDomainProfile } from "./profile";
 import { createSession, endSession, type SessionHandle } from "./services/api";
+import {
+  PARTICIPANT_PARAM,
+  markParticipantLinkSpent,
+  participantSessionFromUrl,
+  readParticipantLink,
+  rememberParticipantLink,
+} from "./services/participantLink";
 import DomainIntake from "./components/DomainIntake";
 import ConversationView from "./components/ConversationView";
 import SummaryView from "./components/SummaryView";
@@ -62,6 +69,18 @@ export default function App() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [participantConnected, setParticipantConnected] = useState(false);
   const [participantJoin, setParticipantJoin] = useState<{ sessionId: string; token: string } | null>(null);
+  /**
+   * Phase 7F: the pairing link on this device is spent.
+   *
+   * A separate flag from `participantJoin === null` because the two are not the
+   * same thing: the welcome screen means "this device never joined", while this
+   * means "this device was a participant and that session is finished". Showing
+   * the operator's welcome screen to a phone in the second state is what made an
+   * ended link look reusable.
+   */
+  const [participantLinkClosed, setParticipantLinkClosed] = useState(false);
+  /** The host pressed back during a private session: ask before abandoning it. */
+  const [hostLeavePrompt, setHostLeavePrompt] = useState(false);
   const hostSocketRef = useRef<Socket | null>(null);
   /** The paired device is translating right now (private mode only). */
   const [peerTranslating, setPeerTranslating] = useState(false);
@@ -77,21 +96,52 @@ export default function App() {
    */
   const lockedFormFields = useRef<string[]>([]);
 
-  // A QR pairing link is `<origin>/join/LD-XXXXXX#token=<secret>`. The secret
-  // arrives in the URL fragment, which browsers never send in an HTTP request;
-  // it is consumed once, kept in memory only, and scrubbed from the visible
-  // address bar (and history) before the socket connects.
-  useEffect(() => {
-    const pathMatch = /\/join\/([^/?#]+)/.exec(window.location.pathname);
-    const legacyId = new URLSearchParams(window.location.search).get("join");
-    const sessionId = pathMatch ? decodeURIComponent(pathMatch[1]) : legacyId;
-    const token = new URLSearchParams(window.location.hash.slice(1)).get("token");
-    if (!sessionId || !token) return;
+  /*
+    A QR pairing link is `<origin>/join/LD-XXXXXX#token=<secret>`. The secret
+    arrives in the URL fragment, which browsers never send in an HTTP request; it
+    is consumed once and scrubbed from the visible address bar (and history)
+    before the socket connects.
 
-    setParticipantJoin({ sessionId, token });
-    setMode(AppMode.PRIVATE_PARTICIPANT);
-    // Removes `/join/<id>` and the #token fragment from the address bar.
-    window.history.replaceState(null, "", "/");
+    Phase 7F: the scrub used to be the whole story, and a refresh then had nothing
+    left to detect - so a phone that had been a participant came back as an
+    operator, on the host's welcome screen. The role is now remembered for the tab
+    (see services/participantLink) and the URL keeps a non-secret `?p=<id>`
+    marker, so this effect can tell the two apart:
+
+      - a real join link with a token  -> join, and remember it for this tab;
+      - `?p=` with a remembered token -> the same tab, after a refresh: rejoin;
+      - `?p=` with no token            -> the link is spent: the dead-end screen.
+
+    A host never has the marker, so the operator application is untouched.
+  */
+  useEffect(() => {
+    const sessionId = participantSessionFromUrl();
+    if (!sessionId) return;
+
+    const tokenFromUrl = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (tokenFromUrl) {
+      rememberParticipantLink(sessionId, tokenFromUrl);
+      setParticipantLinkClosed(false);
+      setParticipantJoin({ sessionId, token: tokenFromUrl });
+      setMode(AppMode.PRIVATE_PARTICIPANT);
+      // Drops `/join/<id>` and the #token fragment; keeps only the marker.
+      window.history.replaceState(null, "", `/?${PARTICIPANT_PARAM}=${encodeURIComponent(sessionId)}`);
+      return;
+    }
+
+    // No token in the URL: either this tab joined before (a refresh), or the link
+    // is stale. The remembered token is the only thing that can tell those apart.
+    const remembered = readParticipantLink(sessionId);
+    if (remembered) {
+      setParticipantLinkClosed(false);
+      setParticipantJoin({ sessionId, token: remembered.token });
+      setMode(AppMode.PRIVATE_PARTICIPANT);
+      return;
+    }
+
+    // Marker without a credential: this pairing link is spent. Falling through to
+    // the welcome screen here is what made an ended link look reusable.
+    setParticipantLinkClosed(true);
   }, []);
 
   useEffect(() => {
@@ -293,6 +343,86 @@ export default function App() {
     setMode(AppMode.PRIVATE_HOST);
   };
 
+  /**
+   * Phase 7F: a participant link is a one-way door.
+   *
+   * When the session ends, the phone used to be sent to the operator's welcome
+   * screen - the clinic UI, the domain picker, the shared-device launcher - which
+   * is the entire host application. A phone that scanned a QR should never see
+   * any of that, and from there a stale link looked alive when the server had
+   * already forgotten the session.
+   *
+   * So the phone stays on its own dead-link screen and the URL is scrubbed: the
+   * pairing code is spent, and revisiting it gets 404 from the server.
+   */
+  const leaveParticipantView = () => {
+    // Read the marker before the history is rewritten, so it can be put back.
+    const sessionId = participantSessionFromUrl();
+    setParticipantJoin(null);
+    setParticipantLinkClosed(true);
+    // The credential is dropped with the session: a refresh now finds the marker
+    // and no token, and goes straight to the dead-link screen instead of trying to
+    // rejoin something the server has already forgotten.
+    markParticipantLinkSpent();
+    // The marker itself stays, deliberately. It is not a secret, and it is the only
+    // thing that tells a refresh "this tab is a participant" - drop it and the next
+    // refresh would land on the host's welcome screen, which is the exact bug this
+    // replaces.
+    window.history.replaceState(
+      null,
+      "",
+      sessionId ? `/?${PARTICIPANT_PARAM}=${encodeURIComponent(sessionId)}` : window.location.pathname
+    );
+  };
+
+  /**
+   * Phase 7F: the host's back button asked for nothing.
+   *
+   * Pressing back on the host used to unload the page, abandoning a live private
+   * session with no warning: the phone kept talking to a session nobody was
+   * watching, and the pairing code stayed valid until the TTL swept it. The host
+   * now gets the same two-way question the phone does - end the session, or stay.
+   */
+  useEffect(() => {
+    const inPrivateFlow = mode === AppMode.PRIVATE_HOST || mode === AppMode.CONVERSATION;
+    if (!inPrivateFlow || !privateSession) return;
+
+    const sentinel = { privateSessionHost: privateSession.sessionId };
+    // Phase 7F: keep any query string. `pathname` alone would drop it, and a
+    // participant's `?p=` marker must never be erased by the host's guard.
+    const url = `${window.location.pathname}${window.location.search}`;
+    const isArmed = () =>
+      (window.history.state as { privateSessionHost?: string } | null)?.privateSessionHost ===
+      privateSession.sessionId;
+    if (!isArmed()) window.history.pushState(sentinel, "", url);
+
+    const onPopState = () => {
+      if (!isArmed()) window.history.pushState(sentinel, "", url);
+      setHostLeavePrompt(true);
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => {
+      window.removeEventListener("popstate", onPopState);
+    };
+  }, [mode, privateSession]);
+
+  /** Host picked "End session" from its own back-button question. */
+  const endSessionFromHostBack = async () => {
+    setHostLeavePrompt(false);
+    if (privateSession) {
+      endingSessionRef.current = true;
+      await endSession(privateSession.sessionId, privateSession.token);
+    }
+    setPrivateSession(null);
+    setParticipantConnected(false);
+    setPeerTranslating(false);
+    setProfile(null);
+    setConversation([]);
+    lockedFormFields.current = [];
+    setMode(AppMode.WELCOME);
+  };
+
   /** Participant connected: hand the host the normal conversation controls. */
   const handleOpenHostConversation = () => {
     setMode(AppMode.CONVERSATION);
@@ -303,6 +433,8 @@ export default function App() {
     setProfile(null);
     setConversation([]);
     setIntakeStep(0);
+    setHostLeavePrompt(false);
+    setParticipantLinkClosed(false);
     lockedFormFields.current = [];
     // Ending a session invalidates its token and drops its data server side.
     if (privateSession) {
@@ -366,6 +498,36 @@ export default function App() {
   // Welcome and private-host screens have their own focused shell: no shared
   // sidebar, header or footer.
   const showAppChrome = mode !== AppMode.WELCOME && mode !== AppMode.PRIVATE_HOST && mode !== AppMode.PRIVATE_PARTICIPANT;
+
+  /*
+    Phase 7F: a spent pairing link is a dead end, and it is an *early* return so
+    that it is enforced by the component's structure rather than by remembering to
+    hide the right pieces.
+
+    Every other screen in this app is the operator's: the clinic/hotel/office
+    domain picker, the shared-device launcher, the intake wizards. A phone that
+    scanned a QR must never reach one of them, so this returns before any of that
+    markup exists. The pairing code is spent server-side too - the same URL is 404
+    now - so this screen says "ask the host" rather than offering a retry that
+    cannot work.
+  */
+  if (participantLinkClosed) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-slate-100 p-6 font-sans text-slate-900">
+        <div className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-sm ring-1 ring-slate-200">
+          <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-400">Language Doctor</p>
+          <h1 className="mt-2 text-lg font-black tracking-tight text-slate-900">This private session has ended</h1>
+          <p className="mt-2 text-sm leading-relaxed text-slate-500">
+            The pairing code is no longer valid and this link cannot be used again. Ask the host device for a new one to
+            start another session.
+          </p>
+          <p className="mt-4 text-xs font-semibold text-slate-400">
+            You can close this page. Nothing was saved.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-900 overflow-hidden">
@@ -625,7 +787,15 @@ export default function App() {
                 <PrivateSessionParticipant
                   sessionId={participantJoin.sessionId}
                   token={participantJoin.token}
-                  onClosed={() => { setParticipantJoin(null); setMode(AppMode.WELCOME); window.history.replaceState(null, "", window.location.pathname); }}
+                  onClosed={leaveParticipantView}
+                  /*
+                    Phase 7F: "Not now" and "the session ended" are different states,
+                    and neither may land on the operator's welcome screen. "Not now"
+                    needs nothing from here - the participant view parks itself and
+                    keeps its own rejoin - while an ended session goes to a dead-link
+                    screen that belongs to no other mode.
+                  */
+                  onEnded={leaveParticipantView}
                 />
               </motion.div>
             )}
@@ -661,6 +831,50 @@ export default function App() {
               <span className="text-green-600 font-black">● Smart Extractors Connected</span>
             </div>
           </footer>
+        )}
+
+        {/*
+          Phase 7F: the host's back button.
+
+          The host had no history guard at all, so back simply unloaded the page
+          and abandoned a live private session - the phone carried on talking to a
+          session nobody was watching, and the pairing code stayed valid until the
+          TTL swept it. The host now gets the same two answers the phone gets, and
+          the wording is the same on purpose: "End session" really does end it for
+          both devices, and "Not now" puts the host back in the conversation with
+          the session intact.
+        */}
+        {hostLeavePrompt && (
+          <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/60 p-4 sm:items-center">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="leave-private-session-title"
+              className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl"
+            >
+              <p id="leave-private-session-title" className="text-sm font-bold text-slate-900">
+                Leave this private session?
+              </p>
+              <p className="mt-1 text-xs leading-snug text-slate-500">
+                Leaving ends the session for both devices and cannot be undone. &quot;Not now&quot; returns to the
+                conversation and keeps the session open, so the paired phone can carry on.
+              </p>
+              <div className="mt-4 flex flex-col gap-2">
+                <button
+                  onClick={() => void endSessionFromHostBack()}
+                  className="rounded-xl bg-red-600 px-4 py-3 text-xs font-bold uppercase tracking-widest text-white transition-colors hover:bg-red-700"
+                >
+                  End session
+                </button>
+                <button
+                  onClick={() => setHostLeavePrompt(false)}
+                  className="rounded-xl bg-slate-100 px-4 py-3 text-xs font-bold uppercase tracking-widest text-slate-600 transition-colors hover:bg-slate-200"
+                >
+                  Not now
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

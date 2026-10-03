@@ -29,6 +29,7 @@ import { io, type Socket } from "socket.io-client";
 import { Loader2, Mic, MicOff, Send, ShieldCheck, Volume2, Wifi } from "lucide-react";
 import { AppDomain, Language, Message } from "../types";
 import { endSession, fetchCapabilities, fetchSession, transcribeAudio } from "../services/api";
+import { markParticipantLinkSpent } from "../services/participantLink";
 import { participantDeviceId } from "../services/deviceIdentity";
 import {
   LocalAudioRecorder,
@@ -50,6 +51,23 @@ interface Props {
   sessionId: string;
   token: string;
   onClosed: () => void;
+  /**
+   * Phase 7F: how the participant view ended, and - critically - whether this
+   * device may ever come back.
+   *
+   * The phone reached this app through a session link, so "closed" must never mean
+   * "show the host's welcome screen": that is the whole operator application,
+   * including the shared-device clinic UI, and a phone is neither. It also made
+   * "Not now" look like the session had been torn down, and left an ended phone
+   * able to wander back into the app.
+   *
+   *  - `left`   - "Not now": the session is alive, this device may rejoin with the
+   *               same link, so a rejoin button is offered.
+   *  - `ended`  - the session is gone for good (ended here, by the host, or expired).
+   *               No way back in, and the link is dead server-side.
+   */
+  onLeft?: () => void;
+  onEnded?: () => void;
 }
 
 /** Messages arrive as JSON: timestamps need rehydrating and fields validating. */
@@ -67,6 +85,9 @@ function asMessage(value: unknown): Message | null {
     timestamp: new Date(message.timestamp ?? Date.now()),
   };
 }
+
+/** How often a parked participant re-checks that its session still exists. */
+const PARKED_POLL_INTERVAL_MS = 5_000;
 
 /** Server-side rejection codes, rendered as plain sentences. */
 const SEND_ERRORS: Record<string, string> = {
@@ -95,7 +116,13 @@ type EndReason = "host" | "self" | "expired";
  */
 const START_WATCHDOG_MS = 30_000;
 
-export default function PrivateSessionParticipant({ sessionId, token, onClosed }: Props) {
+export default function PrivateSessionParticipant({
+  sessionId,
+  token,
+  onClosed,
+  onLeft,
+  onEnded,
+}: Props) {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   /**
@@ -110,6 +137,39 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
   /** Refused the client role: another device joined this session first. */
   const [rejected, setRejected] = useState<string | null>(null);
   const [ending, setEnding] = useState(false);
+  /*
+    Phase 7F: the moment the session is over - by this device, by the host, or by
+    expiry - the pairing credential is dropped from this tab.
+
+    It is the one place that can catch every route to "over" (`endSessionFromThis
+    Device`, the `session:ended` broadcast, the parked-device poll, the
+    unauthorized check), and it is what makes a refresh after the end land on the
+    dead-link screen instead of silently retrying a session the server has already
+    forgotten. The URL marker is deliberately kept; only the secret is forgotten.
+  */
+  useEffect(() => {
+    if (sessionClosed) markParticipantLinkSpent();
+  }, [sessionClosed]);
+  /**
+   * Phase 7F: "Not now" was pressed - this device left, the session did not.
+   *
+   * This used to call `onClosed()`, which put the phone on the operator's welcome
+   * screen: the clinic UI, the domain picker, the private-session launcher. A
+   * participant phone is none of those, and from there the link looked dead and
+   * the host's "Participant connected" badge dropped with nothing to come back to.
+   *
+   * Instead the phone stays on a participant-only screen that says the session is
+   * still open and offers a rejoin, which is exactly what "Not now" promised.
+   */
+  const [left, setLeft] = useState(false);
+  /**
+   * A rejoin was attempted and the session was gone.
+   *
+   * This is the honest answer to "I said I could come back and now I can't": the
+   * host ended it, or it expired, while this phone was parked. The link is dead
+   * server-side (404), so the phone stops offering a rejoin and says why.
+   */
+  const [rejoinFailed, setRejoinFailed] = useState<string | null>(null);
   /** This device ended the session, so the broadcast must not relabel the reason. */
   const endedHereRef = useRef(false);
   const ended = sessionClosed !== null;
@@ -154,6 +214,12 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // No socket while this device is deliberately parked on the "left" screen: the
+    // host must see a clean disconnect, and a live socket here would keep the
+    // participant badge lit. Rejoining flips `left` back to false, which re-runs
+    // this effect and opens a fresh connection with the same device binding.
+    if (left) return;
+
     const socket = io({
       path: "/socket.io",
       auth: {
@@ -252,7 +318,7 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
     return () => {
       socket.disconnect();
     };
-  }, [sessionId, token]);
+  }, [sessionId, token, left]);
 
   /**
    * The phone's back button (Issue 2).
@@ -275,22 +341,46 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
     if (sessionClosed || rejected) return;
 
     const sentinel = { privateSession: sessionId };
-    const url = `${window.location.pathname}#session`;
-    window.history.pushState(sentinel, "", url);
+    /*
+      Phase 7F: the marker in the query string must survive this push.
+
+      `pathname` is only the path - it excludes `?p=<session id>`. Rebuilding the
+      URL from it rewrote the address bar to `/#session`, silently deleting the
+      marker App.tsx had just written. A refresh then had no marker to read, no
+      token in the URL, and fell through to the host's welcome screen: the exact
+      failure this marker exists to prevent. `search` is carried over so the only
+      thing this guard ever changes is the fragment.
+    */
+    const url = `${window.location.pathname}${window.location.search}#session`;
+
+    /**
+     * Is the current history entry already ours?
+     *
+     * This is what makes the guard idempotent. Under <StrictMode> the effect runs
+     * mount -> cleanup -> mount; pushing unconditionally on every run stacked two
+     * entries, and the old cleanup's history.back() popped one, whose popstate
+     * opened the leave dialog the instant the QR was scanned. Asking the entry
+     * instead of keeping a flag means the sentinel exists exactly once, however
+     * many times the effect runs.
+     */
+    const isArmed = () =>
+      (window.history.state as { privateSession?: string } | null)?.privateSession === sessionId;
+
+    if (!isArmed()) window.history.pushState(sentinel, "", url);
 
     const onPopState = () => {
-      window.history.pushState(sentinel, "", url);
+      // Re-arm first: the entry we just left must be consumed, so a second back
+      // cannot walk off this page while the question is on screen.
+      if (!isArmed()) window.history.pushState(sentinel, "", url);
       setLeavePrompt(true);
     };
 
     window.addEventListener("popstate", onPopState);
     return () => {
       window.removeEventListener("popstate", onPopState);
-      // Hand the extra entry back, or "back" would appear to do nothing once this
-      // view is gone.
-      if ((window.history.state as { privateSession?: string } | null)?.privateSession === sessionId) {
-        window.history.back();
-      }
+      // The entry is deliberately NOT popped here. Navigation from a cleanup is
+      // what produced the phantom dialog in the first place; the sentinel is left
+      // in place, where a later visit finds it already armed.
     };
   }, [sessionId, sessionClosed, rejected]);
 
@@ -320,14 +410,56 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
    * purged, the token stays valid, and the device binding stays claimed - which is
    * what lets this same device come back with the same link and resume the
    * conversation, and what keeps a different phone out in the meantime.
+   *
+   * Phase 7F: this parks the phone on its own "you left, rejoin any time" screen
+   * instead of navigating to the operator's welcome page. A participant link is
+   * not a door back into the host application, and the old behaviour left the
+   * host watching a disconnected badge with no way for the phone to return.
    */
   const leaveWithoutEnding = () => {
     setLeavePrompt(false);
     // Deliberately a clean close rather than an abandoned socket: the server's own
     // disconnect handling is what tells the host, on this path as on every other.
     socketRef.current?.disconnect();
-    onClosed();
+    setLeft(true);
+    onLeft?.();
   };
+
+  /** Back to the conversation, same link, same device binding. */
+  const rejoin = () => {
+    setError(null);
+    setRejoinFailed(null);
+    setLeft(false);
+  };
+
+  /**
+   * While parked, the phone has no socket and would never hear `session:ended`, so
+   * it would sit there promising a rejoin into a session the host had already
+   * ended. It polls the session instead: the moment the link stops resolving
+   * (404, ended or expired) the parked screen becomes the terminal one.
+   */
+  useEffect(() => {
+    if (!left) return;
+    let cancelled = false;
+
+    const check = async () => {
+      const live = await fetchSession(sessionId, token);
+      if (cancelled) return;
+      if (!live) {
+        // The host ended it, or the TTL took it. Same destination either way, and
+        // the rejoin offer goes away with the session.
+        setRejoinFailed("This private session has ended.");
+        setSessionClosed((previous) => previous ?? "host");
+      }
+    };
+
+    void check();
+    const timer = setInterval(() => void check(), PARKED_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [left, sessionId, token]);
 
   // Capability badge, from the same server registry the host screen reads.
   useEffect(() => {
@@ -788,18 +920,44 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
               Only the device that joined first can use this link. The session is still running without this device.
             </p>
             <button
-              onClick={onClosed}
+              onClick={() => onEnded?.()}
               className="mt-3 rounded-xl bg-white/10 px-4 py-2 text-[11px] font-bold uppercase tracking-widest"
             >
               Close
             </button>
           </div>
+        ) : left && !ended ? (
+          /*
+            "Not now": parked, not gone. The session is still open on the host and
+            this device still owns it, so the only honest thing to offer is a way
+            back in - never the operator's application, which this phone is not.
+          */
+          <div className="rounded-2xl bg-slate-900 p-5 text-center text-white shadow-sm">
+            <p className="text-sm font-bold">You left the conversation.</p>
+            <p className="mt-1 text-xs text-slate-300">
+              The session is still open on the host device. Nothing was deleted, and this device keeps its place
+              until the session ends.
+            </p>
+            <button
+              onClick={rejoin}
+              className="mt-3 rounded-xl bg-white/10 px-4 py-2 text-[11px] font-bold uppercase tracking-widest"
+            >
+              Rejoin session
+            </button>
+          </div>
         ) : ended ? (
           <div className="rounded-2xl bg-slate-900 p-5 text-center text-white shadow-sm">
-            <p className="text-sm font-bold">{closedHeadline}</p>
+            <p className="text-sm font-bold">{rejoinFailed ?? closedHeadline}</p>
             <p className="mt-1 text-xs text-slate-300">{closedDetail}</p>
+            {/*
+              Phase 7F: closing hands control to onEnded, which is a dead end for
+              this device. The link is finished - the pairing code is dead
+              server-side - so the phone must not be dropped onto the operator's
+              welcome screen, where the clinic UI and the domain picker would be
+              sitting there as if the phone were a host.
+            */}
             <button
-              onClick={onClosed}
+              onClick={() => onEnded?.()}
               className="mt-3 rounded-xl bg-white/10 px-4 py-2 text-[11px] font-bold uppercase tracking-widest"
             >
               Close
@@ -897,7 +1055,7 @@ export default function PrivateSessionParticipant({ sessionId, token, onClosed }
               </details>
             </div>
             <button
-              onClick={onClosed}
+              onClick={onEnded ?? onClosed}
               className="flex items-center justify-center gap-2 text-xs font-bold text-slate-500"
             >
               <ShieldCheck className="h-4 w-4" />

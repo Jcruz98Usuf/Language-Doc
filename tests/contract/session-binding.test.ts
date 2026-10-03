@@ -335,3 +335,150 @@ describe("the phone's back button asks before it leaves", () => {
     expect(view).toMatch(/if \(sessionClosed \|\| rejected\) return;/);
   });
 });
+
+/**
+ * Phase 7F: the phone is a participant, not an operator.
+ *
+ * Every symptom in that round of reports came from one design mistake - the
+ * participant view delegating its "I am finished" to `onClosed`, which returned the
+ * phone to the host's welcome screen. From there it saw the clinic UI, the domain
+ * picker and the private-session launcher; "Not now" looked like a dead session;
+ * and an ended link looked reusable. These tests pin the correction.
+ */
+describe("the pairing link carries the participant UI and nothing else", () => {
+  const view = readFileSync(path.join(ROOT, "src/components/PrivateSessionParticipant.tsx"), "utf8");
+  const app = readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+
+  it("never sends the phone to the welcome screen from the participant view", () => {
+    // The finished-state button used to call onClosed(), which set AppMode.WELCOME.
+    // It now goes to onEnded, and the only remaining onClosed wiring is the footer
+    // fallback for a host that does not pass onEnded at all.
+    expect(view).not.toMatch(/onClick=\{onClosed\}/);
+    expect(view).toContain("onEnded");
+  });
+
+  it("'Not now' parks the phone on a rejoin screen instead of navigating away", () => {
+    const leavePath = view.slice(view.indexOf("const leaveWithoutEnding"));
+    const block = leavePath.slice(0, 600);
+
+    // It disconnects (the host must see a clean leave) and parks - it does not
+    // leave the view, and it does not end anything.
+    expect(block).toMatch(/socketRef\.current\?\.disconnect\(\)/);
+    expect(block).toContain("setLeft(true)");
+    expect(block).not.toContain("onClosed()");
+    expect(view).toContain("Rejoin session");
+  });
+
+  it("reconnects on rejoin through the same device binding", () => {
+    // Rejoining must reuse the one socket path, or the device binding would be
+    // re-claimed by a second connection and the host would see a churn.
+    expect(view).toContain("const rejoin");
+    expect(view).toMatch(/\[sessionId, token, left\]/);
+  });
+
+  it("stops offering a rejoin once the session is gone", () => {
+    // A parked phone has no socket, so it would never hear session:ended and would
+    // promise a rejoin into a session the host had already ended. It polls instead.
+    expect(view).toContain("PARKED_POLL_INTERVAL_MS");
+    expect(view).toContain("fetchSession");
+    expect(view).toContain("left && !ended");
+  });
+
+  it("shows a spent link a dead end, not the host application", () => {
+    // An early return, so the operator UI is not merely hidden - it is never built.
+    expect(app).toContain("if (participantLinkClosed) {");
+    expect(app).toContain("This private session has ended");
+    const early = app.indexOf("if (participantLinkClosed) {");
+    const welcome = app.indexOf("mode === AppMode.WELCOME &&");
+    expect(early).toBeGreaterThan(-1);
+    expect(early, "the dead-link screen must come before any host screen is rendered").toBeLessThan(welcome);
+  });
+
+  it("answers the host's back button with the same two choices", () => {
+    // The host had no history guard at all: back unloaded the page and abandoned a
+    // live session while the phone carried on talking to it.
+    expect(app).toContain("setHostLeavePrompt(true)");
+    expect(app).toContain("Leave this private session?");
+    expect(app).toContain("End session");
+    expect(app).toContain("Not now");
+  });
+
+  it("'Not now' on the host keeps the session; 'End session' really ends it", () => {
+    expect(app).toMatch(/const endSessionFromHostBack = async \(\) => \{/);
+    const end = app.slice(app.indexOf("const endSessionFromHostBack"));
+    expect(end.slice(0, 600)).toContain("endSession(privateSession.sessionId, privateSession.token)");
+    // Dismissing the host's question must not tear the session down.
+    const dismiss = app.slice(app.indexOf("onClick={() => setHostLeavePrompt(false)}"));
+    expect(dismiss.slice(0, 120)).not.toContain("endSession(");
+  });
+});
+
+/**
+ * The refresh case, which is the one that actually broke.
+ *
+ * Consuming the pairing link scrubs the secret from the URL on purpose, and that
+ * left nothing to detect on reload - so a phone that had been a participant came
+ * back as an operator, on the host's welcome screen. These pin the two halves of
+ * the fix: the role is remembered for the tab, and the URL keeps a marker that
+ * distinguishes a participant tab from a host tab.
+ */
+describe("a refresh never turns a participant into the host", () => {
+  const app = readFileSync(path.join(ROOT, "src/App.tsx"), "utf8");
+  const link = readFileSync(path.join(ROOT, "src/services/participantLink.ts"), "utf8");
+  const view = readFileSync(path.join(ROOT, "src/components/PrivateSessionParticipant.tsx"), "utf8");
+
+  it("remembers the pairing for the tab, in sessionStorage rather than localStorage", () => {
+    // sessionStorage survives a refresh (the broken case) and dies with the tab, so
+    // a live token is never left on a shared or clinic phone.
+    expect(link).toContain("window.sessionStorage");
+    expect(link).not.toContain("window.localStorage");
+    expect(app).toContain("rememberParticipantLink");
+    expect(app).toContain("readParticipantLink");
+  });
+
+  it("keeps a non-secret marker in the URL so a participant tab is recognisable", () => {
+    expect(link).toContain("PARTICIPANT_PARAM");
+    expect(app).toContain("participantSessionFromUrl");
+    // The secret must never be written back into the URL.
+    expect(app).not.toMatch(/replaceState\([^)]*token/);
+  });
+
+  it("rejoins from the remembered credential when the URL has no token", () => {
+    expect(app).toMatch(/const remembered = readParticipantLink\(sessionId\)/);
+    const restore = app.slice(app.indexOf("const remembered = readParticipantLink"));
+    expect(restore.slice(0, 400)).toContain("setParticipantJoin({ sessionId, token: remembered.token })");
+  });
+
+  it("sends a spent link to the dead end rather than the welcome screen", () => {
+    // Marker present, no credential: the pairing is finished.
+    const spent = app.slice(app.indexOf("setParticipantLinkClosed(true);"));
+    expect(spent.slice(0, 200)).not.toContain("AppMode.WELCOME");
+  });
+
+  it("forgets the credential as soon as the session is over, by any route", () => {
+    // One place catches the self-end, the host broadcast, the parked poll and the
+    // unauthorized check, so a refresh afterwards cannot retry a dead session.
+    expect(view).toContain("if (sessionClosed) markParticipantLinkSpent();");
+    expect(app).toContain("markParticipantLinkSpent");
+  });
+
+  it("keeps the marker after the end, so a refresh still knows this is a participant", () => {
+    const leave = app.slice(app.indexOf("const leaveParticipantView"));
+    const block = leave.slice(0, 1400);
+    expect(block).toContain("PARTICIPANT_PARAM");
+    // Dropping the marker would put the next refresh straight back on the host UI.
+    expect(block).not.toMatch(/replaceState\(null, "", window\.location\.pathname\)/);
+  });
+
+  it("no history rewrite may rebuild the URL from pathname alone", () => {
+    // This is the bug that made refresh land on the host's welcome screen, and it
+    // was invisible: `pathname` is a perfectly valid URL, it is just missing the
+    // `?p=` marker, so the participant's own back-button guard erased the very thing
+    // that identified the tab as a participant.
+    const participant = readFileSync(path.join(ROOT, "src/components/PrivateSessionParticipant.tsx"), "utf8");
+    for (const [name, source] of [["App.tsx", app], ["PrivateSessionParticipant.tsx", participant]] as const) {
+      const bare = source.match(/(?:push|replace)State\([^)]*window\.location\.pathname/g);
+      expect(bare, `${name} rebuilds a history URL from pathname, dropping the ?p= marker`).toBeNull();
+    }
+  });
+});

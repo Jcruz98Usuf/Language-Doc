@@ -24,6 +24,7 @@ import {
   getWhisperOnnxConfig,
   isHfRuntimePresent,
   whisperCacheStatus,
+  warmUpWhisperPipelines,
 } from "./whisperOnnxProvider";
 import { WhisperCppProvider, WHISPER_CPP_PROVIDER_ID } from "./whisperCppProvider";
 
@@ -133,10 +134,16 @@ export async function describeSttEngine(): Promise<{
 }
 
 /**
- * Loads the English model in the background at boot when its weights are already
- * local, so the first utterance is not slowed by a cold model load. Never
- * downloads: if the weights are missing, the first /api/transcribe triggers the
- * one-time download and says so in the log.
+ * Loads the local speech-to-text model at boot when its weights are already on
+ * disk, so the first spoken utterance is not slowed by a cold model load.
+ *
+ * Phase 7E: this used to call `describeSttEngine()`, which only checks that the
+ * weights exist - it never put a model in memory, so the whole load happened
+ * inside the operator's first `/api/transcribe` and the first recording felt
+ * several seconds slower than all the others. It now really loads the pipeline.
+ *
+ * Never downloads: if the weights are missing the first /api/transcribe triggers
+ * the one-time download and says so in the log.
  */
 export async function warmUpStt(): Promise<void> {
   if (!isHfRuntimePresent()) {
@@ -156,12 +163,7 @@ export async function warmUpStt(): Promise<void> {
   }
 
   try {
-    const readiness = await describeSttEngine();
-    if (!readiness.available) {
-      console.log(`[stt] ${readiness.detail}`);
-      return;
-    }
-    console.log(`[stt] local speech-to-text ready (${readiness.model}, provider ${readiness.provider})`);
+    await warmUpWhisperPipelines();
   } catch (error) {
     console.warn(`[stt] warm-up skipped: ${error instanceof Error ? error.message : String(error)}`);
   }

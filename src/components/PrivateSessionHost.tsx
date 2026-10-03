@@ -125,6 +125,26 @@ export default function PrivateSessionHost({
 
   useEffect(() => setParticipantConnected(connectedFromSocket), [connectedFromSocket]);
 
+  /**
+   * Phase 7E: open the conversation as soon as the participant is here.
+   *
+   * The host used to have to notice the "Participant connected" badge and press
+   * "Open conversation controls", which added a dead beat to every private
+   * session - the two devices were already paired and talking, but the host
+   * screen was still showing a QR code.
+   *
+   * The ref makes this fire exactly once, on the false -> true edge, so a later
+   * disconnect/reconnect does not yank the host out of an in-progress
+   * conversation. The manual button stays as a fallback: if auto-advance is
+   * ever unwanted, the host is never trapped here.
+   */
+  const advancedRef = useRef(false);
+  useEffect(() => {
+    if (!participantConnected || serverExpired || closedRef.current || advancedRef.current) return;
+    advancedRef.current = true;
+    onOpenConversation();
+  }, [participantConnected, serverExpired, onOpenConversation]);
+
   const handleEndSession = async () => {
     if (closedRef.current) return;
     closedRef.current = true;
